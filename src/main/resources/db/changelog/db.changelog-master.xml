@@ -3,5 +3,5 @@
         xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
-    <!-- Domain migrations will be added after their specifications are agreed. -->
+    <include file="001-create-courier-location-inputs.xml" relativeToChangelogFile="true"/>
 </databaseChangeLog>

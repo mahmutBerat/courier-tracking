@@ -2,8 +2,11 @@
 
 A Java REST API project for tracking courier locations, store entries, and total
 travel distance. The project skeleton and local development infrastructure are
-ready; domain behavior and REST endpoints have not been implemented yet.
-Decisions and open questions are recorded in [initial-decisions.md](initial-decisions.md).
+ready. POST location submission persists inputs; distance and store-entry processing
+are not implemented yet.
+Decisions and open questions are recorded in [initial-decisions.md](docs/initial-decisions.md).
+See the [documentation index](docs/README.md) for the specification workflow and
+the [development roadmap](docs/roadmap.md) for the proposed sequence.
 
 All project code, comments, documentation, and command descriptions must be written
 in English. Proper names from the supplied store data retain their original spelling.
@@ -107,12 +110,14 @@ make test
 Docker must be running. The existing context test starts a separate PostgreSQL 18
 container through Testcontainers; it does not use the Compose database and does not
 require `make up`. Testcontainers supplies the connection details and temporary
-port automatically. Domain acceptance tests have not been implemented yet.
+port automatically. Location submission integration tests verify committed input
+records through the HTTP endpoint and the real generated MapStruct mapper.
 
 The Liquibase changelog is located at
 `src/main/resources/db/changelog/db.changelog-master.xml`.
-The initial changelog is empty; migrations will be added as the domain schema is
-agreed. Automatic Hibernate schema generation is disabled.
+The first migration creates `courier_location_inputs` for traceability. Automatic
+Hibernate schema generation is disabled. Input timestamps use PostgreSQL
+microsecond precision; coordinates retain the existing Double representation.
 
 ## Troubleshooting
 
@@ -125,3 +130,70 @@ References: the [official Docker image documentation](https://hub.docker.com/_/p
 for the PostgreSQL 18 volume layout, and the
 [Spring Boot properties reference](https://docs.spring.io/spring-boot/appendix/application-properties/index.html)
 for Spring configuration.
+
+## API controller increment
+
+```sh
+curl -i -X POST http://localhost:8080/api/v1/couriers/locations \
+  -H 'Content-Type: application/json' \
+  -d '{"time":"2026-10-21T12:00:00Z","courier":"courier-1","lat":40.9923307,"lng":29.1244229}'
+
+curl -i 'http://localhost:8080/api/v1/couriers/distance?courierId=courier-1'
+```
+
+All POST fields are required. `time` represents a UTC instant; courier identifiers
+are nonblank strings. GET requires the `courierId` query parameter.
+The accepted response contract is POST `204 No Content`, GET `200` with
+`{"courierId":"courier-1","distanceMeters":1234.56}`, and `404` for unknown couriers.
+These outcomes are verified with a test backend.
+
+Valid POST requests now return `204` after the input record is committed. Each
+accepted submission creates a trace record; distance accumulation and store-entry
+processing are TODOs in the service. GET still returns `501 Not Implemented` with
+Problem Details, even for a courier with stored inputs. See
+[S004](docs/specs/004-location-submission.md) for this intermediate scope.
+Binding/required-field errors return `400`; non-JSON POST requests return
+`415`. The contract and remaining validation policies are documented in
+[S002](docs/specs/002-api-contract-and-controllers.md).
+
+Run API binding and controller tests without Docker:
+
+```sh
+./gradlew test --tests '*CourierControllerTests' --tests '*CourierLocationInputJsonTests' --tests '*CourierServiceAvailabilityTests'
+```
+
+The tests use Spring Boot's [MVC test slice](https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html).
+
+## Lombok
+
+Lombok is configured as a compile-only dependency and annotation processor for
+main and test code, using the version managed by Spring Boot. Controllers use
+`@RequiredArgsConstructor` with final service fields. The controller calls the
+concrete `CourierService`, whose required repository and mapper dependencies also
+use Lombok constructor injection.
+
+Reload the Gradle project in IntelliJ after pulling build changes. The Gradle
+build handles annotation processing using the
+[official Lombok setup](https://projectlombok.org/setup/gradle).
+
+## MapStruct
+
+Entity/DTO conversions use MapStruct 1.6.3 with `lombok-mapstruct-binding` 0.2.0.
+All mappers use `BaseMapperConfig`: Spring components, constructor injection, and
+compile-time errors for unmapped target properties. Inject mappers instead of
+creating static instances. Gradle generates implementations during compilation.
+
+`CourierMapper` creates the total distance response. `CourierLocationMapper` maps
+API input to the persisted trace record, explicitly renaming coordinate/courier
+fields and ignoring the generated row ID. Reload the Gradle project in
+IntelliJ after this dependency change. See the
+[MapStruct Lombok integration guide](https://mapstruct.org/documentation/stable/reference/html/#lombok).
+
+## Package organization
+
+Courier controllers, API records, and mappers live in `courier.api`; the concrete
+service lives in `courier.application`. Shared mapper configuration stays in
+`common.mapping`. Test packages mirror the feature packages.
+
+Input history entity, repository, and mapper live in `courier.persistence`.
+Courier domain and store domain/persistence packages will be created when needed. See [S003](docs/specs/003-application-structure.md).
