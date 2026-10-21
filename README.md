@@ -1,199 +1,188 @@
-# Courier Tracking
+# Courier Tracking API
 
-A Java REST API project for tracking courier locations, store entries, and total
-travel distance. The project skeleton and local development infrastructure are
-ready. POST location submission persists inputs; distance and store-entry processing
-are not implemented yet.
-Decisions and open questions are recorded in [initial-decisions.md](docs/initial-decisions.md).
-See the [documentation index](docs/README.md) for the specification workflow and
-the [development roadmap](docs/roadmap.md) for the proposed sequence.
+A Java and Spring Boot REST API for tracking courier locations, accumulating travel
+distance, and detecting entries into Migros store areas. The project uses
+PostgreSQL transactions for consistent courier state and develops one API at a
+time from documented decisions and acceptance examples.
 
-All project code, comments, documentation, and command descriptions must be written
-in English. Proper names from the supplied store data retain their original spelling.
+Courier registration/listing, location submission, travel-distance accumulation,
+and distance queries are implemented. Store catalog and store-entry processing
+remain pending. This
+README describes the current implementation and points reviewers to the decisions,
+verification evidence, and remaining work.
 
-## Requirements
+## Key capabilities
 
-- JDK 25 (check with `java -version`).
-- A running Docker Engine or Docker Desktop.
-- Docker Compose v2 with `--wait` support.
-- GNU Make.
+- Register couriers explicitly and list registered courier IDs.
+- Persist distinct location reports for registered couriers for traceability.
+- Suppress exact duplicates using a database unique constraint and native
+  `INSERT ... ON CONFLICT DO NOTHING`.
+- Accumulate Haversine distance in meters from each courier's last processed location.
+- Retain delayed and same-time distinct reports without changing travel state.
+- Commit input storage and courier state together, with `SELECT FOR UPDATE` to
+  serialize updates for the same courier.
+- Validate coordinates and required API fields, with Problem Details for errors.
+- Manage schema changes through Liquibase and verify persistence against real
+  PostgreSQL using Testcontainers.
 
-A separate Gradle installation is not required; use the Gradle Wrapper included in
-the repository. The first run requires an internet connection to download Gradle
-dependencies and the PostgreSQL image.
+## Reviewer reading guide
 
-## Quick start
+| Read | What it explains |
+|---|---|
+| [Initial decisions](docs/initial-decisions.md) | Case study requirements, shared domain language, accepted choices, and their evolution |
+| [Application structure — S003](docs/specs/003-application-structure.md) | Responsibilities, aggregate boundaries, Strategy and Repository decisions |
+| [Location submission — S004](docs/specs/004-location-submission.md) | Input persistence, duplicate identity, millisecond precision, and migration evidence |
+| [Travel distance — S005](docs/specs/005-travel-distance-processing.md) | Ordering examples, transaction and locking trade-offs, implementation, and test evidence |
+| [API contract — S002](docs/specs/002-api-contract-and-controllers.md) | HTTP contracts and the distinction between controller tests and implemented backend behavior |
+| [Courier registration — S006](docs/specs/006-courier-registration.md) | Explicit creation/listing and unknown-courier handling, superseding automatic creation |
+| [Roadmap](docs/roadmap.md) | Current progress and remaining delivery scope |
 
-From the project root:
+Specifications distinguish proposed choices, accepted decisions, implemented
+behavior, and verified behavior. For detailed API examples, mapping conventions,
+and package responsibilities, see the [implementation guide](docs/implementation-guide.md).
+The [documentation index](docs/README.md) also links the development workflow,
+local skills, and review checklist.
+
+## Architecture and design patterns
+
+The application uses feature-based packages under `com.mbi.couriertracking`:
+
+```text
+courier/
+  api/           Controllers, request/response records, response mapping
+  application/   Use-case orchestration and transaction boundaries
+  domain/        Courier travel state and ordering rules
+  persistence/   Input records, Spring Data repositories, persistence mapping
+common/
+  geo/           Validated coordinates and distance calculation Strategy
+  mapping/       Shared MapStruct configuration
+```
+
+Controllers call the concrete `CourierService`. The service coordinates persistence
+and invokes `Courier`, which owns its last processed location/time and total
+distance. Domain operations do not access repositories. Store packages will be
+introduced with the store implementation.
+
+| Pattern | Implementation and purpose |
+|---|---|
+| Strategy | `DistanceCalculatorStrategy` separates distance calculation from courier rules; `HaversineDistanceCalculatorStrategy` implements the spherical calculation |
+| Repository | Spring Data JPA interfaces provide persistence operations directly, without an additional repository adapter layer |
+
+## Processing and consistency decisions
+
+Couriers must be registered before submitting locations. Unknown courier IDs return
+`404` without storing input.
+
+A report's identity is `(courier, time, lat, lng)`, with time truncated to
+milliseconds. An exact repeat returns `204` without another input row or distance
+update. Duplicate reports also acquire the courier lock. No idempotency header or cache layer is required; cache optimization is
+recorded as a future TODO.
+
+The first processed location initializes distance to zero. A strictly newer input
+adds the distance from the last processed location and advances courier state.
+Older or same-time distinct reports remain in input history but do not affect
+calculation. Normal calculations use persisted courier state without replaying
+input history.
+
+Input insertion and courier advancement share one transaction. Courier-row locking
+prevents concurrent requests from losing updates; failures roll back both writes.
+The transaction has a five-second timeout. Requests are not sorted by event time,
+and contention for a busy courier can cause waits or timeouts. See
+[S005](docs/specs/005-travel-distance-processing.md) for the alternatives considered
+and PostgreSQL concurrency tests.
+
+Distance is the sum of Haversine segments between sampled coordinates, using a
+6,371,000-meter Earth radius. It is not a road-route calculation; sampling frequency
+and GPS accuracy affect the result.
+
+## Technology stack
+
+| Area | Technology |
+|---|---|
+| Runtime | Java 25, Spring Boot 4.1.1 |
+| HTTP and validation | Spring Web MVC, Jakarta Validation |
+| Persistence | PostgreSQL 18, Spring Data JPA, Hibernate |
+| Migrations | Liquibase; native SQL changeSets in one master XML |
+| Mapping and injection | MapStruct 1.6.3, Lombok |
+| Health | Spring Boot Actuator |
+| Testing | JUnit, Mockito, Spring Boot Test, PostgreSQL Testcontainers |
+| Build and local execution | Gradle Wrapper, GNU Make, Docker Compose |
+
+## API overview
+
+| Method | Endpoint | Current behavior |
+|---|---|---|
+| POST | `/api/v1/couriers` | Register an ID; `201`, or `409` if already registered |
+| GET | `/api/v1/couriers` | Sorted array of courier IDs; `[]` for an empty registry |
+| POST | `/api/v1/couriers/locations` | Persist input and update travel distance; `204` after commit, including duplicates |
+| GET | `/api/v1/couriers/distance?courierId=...` | `200` with persisted distance; `0` before any location; `404` for unknown couriers |
+| GET | `/actuator/health` | Application health |
+
+POST accepts `time`, `courier`, `lat`, and `lng`. Required-field or coordinate
+validation failures return `400`; non-JSON POST requests return `415`.
+See the [API examples and response details](docs/implementation-guide.md#api-controller-increment).
+
+## Swagger and curl examples
+
+After `make run`, open [Swagger UI](http://localhost:8080/swagger-ui/index.html)
+to invoke every API with example payloads. The
+[OpenAPI JSON](http://localhost:8080/v3/api-docs) and
+[YAML](http://localhost:8080/v3/api-docs.yaml) are also available.
+
+Follow the [curl walkthrough](docs/api-examples.md) to check health, register and
+list couriers, submit locations, and call the distance endpoint. Examples include
+expected statuses and error cases. Distance queries return the persisted total in meters.
+
+## Run locally
+
+Install JDK 25, Docker Engine/Desktop, Docker Compose v2 with `--wait` support,
+and GNU Make. Start Docker, then run:
 
 ```sh
 make run
 ```
 
-This command starts PostgreSQL 18, waits for its health check to pass, and runs the
-Spring Boot application in the terminal with the `local` profile.
-The default application address is `http://localhost:8080`.
-
-From another terminal:
+The application runs at `http://localhost:8080`; PostgreSQL runs in Compose.
+Check health from another terminal:
 
 ```sh
 curl --fail http://localhost:8080/actuator/health
 ```
 
-A healthy application's JSON response contains `"status":"UP"`. Stop the application
-with `Ctrl+C`. PostgreSQL keeps running in the background. To stop it:
+Stop the application with `Ctrl+C`, then run `make down` to stop PostgreSQL.
+Database data remains in its named volume. The first run needs internet access
+for dependencies and the database image. See the
+[local development guide](docs/development-guide.md) for all commands, environment
+variables, IDE setup, migration details, and troubleshooting.
 
-```sh
-make down
-```
-
-Data is persisted in a named volume. Neither `make down` nor `make clean` deletes
-the database.
-
-## Commands
-
-| Command | Description |
-|---|---|
-| `make` / `make help` | List available commands |
-| `make up` | Start PostgreSQL and wait until it is ready |
-| `make run` | Prepare PostgreSQL and run the application |
-| `make down` | Remove Compose services while preserving data |
-| `make status` | Show Compose service status |
-| `make logs` | Follow PostgreSQL logs |
-| `make db-shell` | Open the `psql` console (exit with `\q`) |
-| `make test` | Run tests |
-| `make build` | Run tests and package JAR files under `build/libs/` |
-| `make clean` | Remove Gradle build outputs |
-
-## Local configuration
-
-| Variable | Default |
-|---|---|
-| `DB_PORT` | `5432` |
-| `DB_NAME` | `courier_tracking` |
-| `DB_USER` | `courier_tracking` |
-| `DB_PASSWORD` | `courier_tracking_local` |
-| `SERVER_PORT` | `8080` |
-
-The PostgreSQL port is published only on `127.0.0.1`. Default credentials are for
-local development. Make variables are passed to both Compose and the application.
-For example, if another PostgreSQL instance already uses port 5432:
-
-```sh
-make run DB_PORT=5433 SERVER_PORT=8081
-```
-
-You can also export settings in your shell for use throughout the session:
-
-```sh
-export DB_PORT=5433
-make up
-make run
-```
-
-PostgreSQL user, password, and database settings are applied only when an empty
-volume is initialized for the first time. Changing these variables with an existing
-volume does not change the database user or password.
-
-To run from IntelliJ, first run `make up`, then run `CourierTrackingApplication`.
-No profile configuration is required: `local` is the default when no active profile
-is explicitly selected. Selecting another active profile replaces this fallback.
-If you use custom `DB_*` values, add the same values to the IDE run configuration's
-environment variables.
-
-## Tests and migrations
+## Testing and verification
 
 ```sh
 make test
 ```
 
-Docker must be running. The existing context test starts a separate PostgreSQL 18
-container through Testcontainers; it does not use the Compose database and does not
-require `make up`. Testcontainers supplies the connection details and temporary
-port automatically. Location submission integration tests verify committed input
-records through the HTTP endpoint and the real generated MapStruct mapper.
+Docker is required. Integration tests use an independent PostgreSQL 18
+Testcontainers database; `make up` is unnecessary. Unit and MVC tests cover domain
+rules, validation, mapping, and the HTTP contract. PostgreSQL tests cover duplicate
+suppression, persistence, rollback, concurrent updates, and lock timeout/retry.
 
-The Liquibase changelog is located at
-`src/main/resources/db/changelog/db.changelog-master.xml`.
-The first migration creates `courier_location_inputs` for traceability. Automatic
-Hibernate schema generation is disabled. Input timestamps use PostgreSQL
-microsecond precision; coordinates retain the existing Double representation.
+The latest recorded full-suite run passed 101 tests;
+[S008](docs/specs/008-distance-query.md) records the latest run and distance-query checks. See
+[S005 verification evidence](docs/specs/005-travel-distance-processing.md#post-implementation-and-verification-evidence)
+for scope and limitations: reloads were tested across transactions, but a full
+application-process restart and throughput benchmark have not been performed.
+Registration and listing are covered by [S006](docs/specs/006-courier-registration.md).
+Docker-free controller test commands are in the
+[implementation guide](docs/implementation-guide.md#api-controller-increment).
 
-## Troubleshooting
+## Remaining work
 
-- Docker connection error: start Docker Desktop/Engine and check with `docker info`.
-- Port already in use: change `DB_PORT` or `SERVER_PORT`.
-- Database does not become ready: inspect `make status` and `make logs`.
-- Java toolchain error: check your JDK 25 installation and `JAVA_HOME`.
+- Load the supplied store catalog and implement store-entry detection and logging.
+  Accepted entry rules include an inclusive 100-meter boundary and a 60-second
+  reentry rule based on the previous physical entry; details are recorded in
+  [S001](docs/specs/001-location-and-entry-semantics.md).
+- Complete API integration and delivery acceptance checks.
+- Add the requested plain HTML page for manually testing location submission and
+  distance queries as the final roadmap step.
 
-References: the [official Docker image documentation](https://hub.docker.com/_/postgres)
-for the PostgreSQL 18 volume layout, and the
-[Spring Boot properties reference](https://docs.spring.io/spring-boot/appendix/application-properties/index.html)
-for Spring configuration.
-
-## API controller increment
-
-```sh
-curl -i -X POST http://localhost:8080/api/v1/couriers/locations \
-  -H 'Content-Type: application/json' \
-  -d '{"time":"2026-10-21T12:00:00Z","courier":"courier-1","lat":40.9923307,"lng":29.1244229}'
-
-curl -i 'http://localhost:8080/api/v1/couriers/distance?courierId=courier-1'
-```
-
-All POST fields are required. `time` represents a UTC instant; courier identifiers
-are nonblank strings. GET requires the `courierId` query parameter.
-The accepted response contract is POST `204 No Content`, GET `200` with
-`{"courierId":"courier-1","distanceMeters":1234.56}`, and `404` for unknown couriers.
-These outcomes are verified with a test backend.
-
-Valid POST requests now return `204` after the input record is committed. Each
-accepted submission creates a trace record; distance accumulation and store-entry
-processing are TODOs in the service. GET still returns `501 Not Implemented` with
-Problem Details, even for a courier with stored inputs. See
-[S004](docs/specs/004-location-submission.md) for this intermediate scope.
-Binding/required-field errors return `400`; non-JSON POST requests return
-`415`. The contract and remaining validation policies are documented in
-[S002](docs/specs/002-api-contract-and-controllers.md).
-
-Run API binding and controller tests without Docker:
-
-```sh
-./gradlew test --tests '*CourierControllerTests' --tests '*CourierLocationInputJsonTests' --tests '*CourierServiceAvailabilityTests'
-```
-
-The tests use Spring Boot's [MVC test slice](https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html).
-
-## Lombok
-
-Lombok is configured as a compile-only dependency and annotation processor for
-main and test code, using the version managed by Spring Boot. Controllers use
-`@RequiredArgsConstructor` with final service fields. The controller calls the
-concrete `CourierService`, whose required repository and mapper dependencies also
-use Lombok constructor injection.
-
-Reload the Gradle project in IntelliJ after pulling build changes. The Gradle
-build handles annotation processing using the
-[official Lombok setup](https://projectlombok.org/setup/gradle).
-
-## MapStruct
-
-Entity/DTO conversions use MapStruct 1.6.3 with `lombok-mapstruct-binding` 0.2.0.
-All mappers use `BaseMapperConfig`: Spring components, constructor injection, and
-compile-time errors for unmapped target properties. Inject mappers instead of
-creating static instances. Gradle generates implementations during compilation.
-
-`CourierMapper` creates the total distance response. `CourierLocationMapper` maps
-API input to the persisted trace record, explicitly renaming coordinate/courier
-fields and ignoring the generated row ID. Reload the Gradle project in
-IntelliJ after this dependency change. See the
-[MapStruct Lombok integration guide](https://mapstruct.org/documentation/stable/reference/html/#lombok).
-
-## Package organization
-
-Courier controllers, API records, and mappers live in `courier.api`; the concrete
-service lives in `courier.application`. Shared mapper configuration stays in
-`common.mapping`. Test packages mirror the feature packages.
-
-Input history entity, repository, and mapper live in `courier.persistence`.
-Courier domain and store domain/persistence packages will be created when needed. See [S003](docs/specs/003-application-structure.md).
+The [roadmap](docs/roadmap.md) tracks these items and their dependencies.

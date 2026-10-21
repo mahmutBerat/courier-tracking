@@ -1,18 +1,16 @@
 package com.mbi.couriertracking.courier.persistence;
 
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
-import jakarta.persistence.Id;
-import jakarta.persistence.Table;
+import jakarta.persistence.*;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
-/** Input history for traceability, not current courier calculation state. */
+/**
+ * Input history for traceability, not current courier calculation state.
+ */
 @Entity
 @Table(name = "courier_location_inputs")
 @Getter
@@ -36,7 +34,7 @@ public class CourierLocationRecord {
     private double longitude;
 
     public CourierLocationRecord(Instant time, String courierId, double latitude, double longitude) {
-        this.time = time;
+        this.time = time.truncatedTo(ChronoUnit.MILLIS); // TODO do we need to truncate?
         this.courierId = courierId;
         this.latitude = latitude;
         this.longitude = longitude;
