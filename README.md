@@ -1,14 +1,14 @@
 # Courier Tracking API
 
 A Java and Spring Boot REST API that receives streaming courier locations,
-accumulates each courier's travel distance, and (next increment) detects entries
-into Migros store areas. Courier state is kept consistent with PostgreSQL
-transactions; every behavior is backed by unit and integration tests.
+accumulates each courier's travel distance, and detects entries into Migros store
+areas. Courier state is kept consistent with PostgreSQL transactions; every
+behavior is backed by unit and integration tests.
 
-**Status:** courier registration/listing, location submission, duplicate
-suppression, travel-distance accumulation, and distance queries are implemented.
-Store catalog loading and store-entry detection are the remaining case-study
-scope; see [Remaining work](#remaining-work).
+**Status:** all case-study behavior is implemented: courier registration/listing,
+location submission with duplicate suppression, travel-distance accumulation and
+query, and store-entry detection with the one-minute rule. See
+[Remaining work](#remaining-work) for delivery polish.
 
 ## Key capabilities
 
@@ -20,6 +20,9 @@ scope; see [Remaining work](#remaining-work).
 - Keep delayed and same-time reports without letting them change travel state.
 - Commit input storage and courier state in one transaction, serialized per courier
   with `SELECT FOR UPDATE`.
+- Detect when a courier enters the 100 m area of any of the five supplied stores,
+  apply the one-minute re-entry rule per courier–store pair, and record every entry
+  with its counted flag in `store_entries`.
 - Validate coordinates and required fields; report errors as RFC 9457 Problem Details.
 - Manage schema with Liquibase; verify persistence against real PostgreSQL with Testcontainers.
 - Swagger UI, OpenAPI JSON/YAML, and an ordered curl walkthrough.
@@ -34,6 +37,10 @@ courier/
   application/   CourierService: use-case orchestration and transaction boundary
   domain/        Courier aggregate: travel ordering and accumulation rules
   persistence/   Input history record, Spring Data repositories, persistence mapper
+store/
+  application/   StoreEntryDetector, catalog loading from stores.json
+  domain/        Store, StoreCatalog, StoreProximityState (entry rules), StoreEntry
+  persistence/   Spring Data repositories for pair state and entries
 common/
   geo/           GeoLocation value object and distance Strategy (Haversine)
   mapping/       Shared MapStruct configuration
@@ -42,15 +49,18 @@ common/
 
 The controller calls the concrete `CourierService`. The service loads and locks
 the courier, stores the input, and invokes `Courier.updateDistance`, which owns the
-ordering and accumulation rules. Domain objects never access repositories or HTTP
-types. A `store` feature package will be added with store-entry detection.
+ordering and accumulation rules. When the report advanced travel state, the service
+hands it to `StoreEntryDetector`, which walks the store catalog and lets
+`StoreProximityState` decide whether a physical entry occurred and whether it
+counts; a report enters at most one store. Domain objects never access
+repositories or HTTP types.
 
 ### Design patterns
 
-| Pattern    | Where                                                                | Purpose                                                                                                                                      |
-|------------|----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
-| Strategy   | `DistanceCalculatorStrategy` / `HaversineDistanceCalculatorStrategy` | Keeps the geographic formula replaceable and the `Courier` aggregate independent of it; the same strategy will serve courier–store proximity |
-| Repository | `CourierRepository`, `CourierLocationRepository` (Spring Data JPA)   | Encapsulates persistence of current courier state and input history behind interfaces used only by the application service                   |
+| Pattern    | Where                                                                                    | Purpose                                                                                                                                     |
+|------------|------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| Strategy   | `DistanceCalculatorStrategy` / `HaversineDistanceCalculatorStrategy`                     | Keeps the geographic formula replaceable and the domain independent of it; one strategy serves both travel segments and store proximity     |
+| Repository | `CourierRepository`, `CourierLocationRepository`, `StoreProximityStateRepository`, `StoreEntryRepository` (Spring Data JPA) | Encapsulates persistence behind interfaces used only by application services; domain objects never touch them                               |
 
 ## API overview
 
@@ -76,8 +86,15 @@ POST location body: `{"time":"2026-10-21T12:00:00Z","courier":"courier-1","lat":
    adds the Haversine distance from the last processed location and becomes the
    new last location/time. Older or same-time distinct reports are stored but do
    not change travel state; the next segment still starts from the last processed location.
-5. Input storage and courier state commit together; a failure rolls back both.
-6. Distance queries read persisted courier state only; input history is never replayed.
+5. A report that advanced travel state is compared with the stores in catalog
+   order until one is entered. Moving from outside to inside the 100 m area
+   (inclusive) is a physical entry. It is counted
+   unless the same courier–store pair had a physical entry less than 60 s earlier
+   (by input time); either way the entry is recorded in `store_entries` with its
+   `counted` flag, which is the entry log required by the case.
+6. Input storage, courier state, pair state, and entries commit together; a
+   failure rolls back all of them.
+7. Distance queries read persisted courier state only; input history is never replayed.
 
 ## Architectural decisions
 
@@ -183,9 +200,63 @@ detailed behavior, acceptance criteria, and verification evidence.
 
 ### ADR-008: Explicit courier registration
 
-### ADR-009: Store entry semantics (accepted, not yet implemented)
+- **Context:** Early increments created a courier row implicitly on the first
+  report, which made unknown IDs indistinguishable from typos.
+- **Decision:** Couriers are registered with POST `/api/v1/couriers` and listed
+  with GET. Location submission for an unregistered ID returns `404` without
+  storing anything. Registration never resets existing travel state.
+- **Alternatives:** Implicit creation on first report.
+- **Trade-offs:** One extra call before streaming, but a clear lifecycle, a
+  meaningful `404`, and no accidental couriers.
+  Spec: [S006](docs/specs/006-courier-registration.md).
 
-### ADR-010: PostgreSQL 18, Liquibase native SQL, Testcontainers
+### ADR-009: Store entry semantics
+
+- **Context:** The case requires logging when a courier enters a 100 m radius of a
+  store and not counting re-entries to the same store within one minute. The
+  wording "reentries ... over 1 minute" is ambiguous.
+- **Decision:** Proximity state belongs to each courier–store pair. An entry is an
+  outside→inside transition (inclusive boundary: `≤ 100 m` is inside). A first
+  observation already inside counts as an entry. A re-entry is counted only when
+  `≥ 60 s` have passed since the pair's previous *physical* entry; an uncounted
+  entry still updates that timestamp. Entry time is the report's input `time`,
+  the same clock that orders travel processing; only reports eligible for travel
+  processing (strictly newer) are evaluated for proximity. Counted and uncounted
+  entries share one `StoreEntry` model with a `counted` flag and are persisted.
+  The five stores are loaded from `stores.json` into an immutable in-memory catalog.
+- **Alternatives:** Server processing time as the entry clock; a single per-courier
+  timer; comparing with the last *counted* entry; exclusive boundary; a `stores` table.
+- **Trade-offs:** Per-pair state is precise and testable; repeated short re-entries
+  can suppress counting indefinitely (by design). Input time keeps entry counting
+  deterministic and replay-safe but trusts the client clock. An in-memory catalog
+  means adding a store requires a redeploy, which matches the supplied-file
+  requirement. Spec: [S001](docs/specs/001-location-and-entry-semantics.md),
+  [S009](docs/specs/009-store-entry-detection.md).
+
+### ADR-010: The entry log is the `store_entries` table
+
+- **Context:** The case asks to "log courier and store" when a courier enters a
+  store area.
+- **Decision:** Every physical entry (counted or not) is persisted in
+  `store_entries` with courier ID, store name, entry time, and `counted`, in the
+  same transaction as the report. No application log line or event is emitted
+  for entries.
+- **Alternatives:** An INFO log line after commit via an application event
+  (implemented and then removed as needless complexity); an outbox and message broker.
+- **Trade-offs:** The record is durable, queryable, and consistent with the rest
+  of the transaction; operators look in the database rather than in log output.
+
+### ADR-011: PostgreSQL 18, Liquibase native SQL, Testcontainers
+
+- **Context:** Correctness depends on database semantics (`ON CONFLICT`,
+  `FOR UPDATE`, timestamp precision), so tests must run against the real engine.
+- **Decision:** PostgreSQL 18 via Docker Compose for local runs; schema managed by
+  Liquibase with native SQL changeSets in one master changelog and
+  `ddl-auto=none`; integration tests use a PostgreSQL Testcontainer; `make` is
+  the single command entry point.
+- **Alternatives:** H2 for local/tests; Hibernate schema generation; Flyway.
+- **Trade-offs:** Tests prove the actual production semantics; Docker and JDK 25
+  are required to run and test the project.
 
 ## Technology stack
 
@@ -224,13 +295,22 @@ make test
 Docker is required; integration tests start their own PostgreSQL 18 container.
 Coverage:
 
-- Domain and geography unit tests: ordering, accumulation, invalid results,
-  coordinate validation, Haversine known distances and edge cases.
+- Domain and geography unit tests: travel ordering and accumulation, invalid
+  results, coordinate validation, Haversine known distances and edge cases, and
+  every store-entry rule (inclusive 100 m boundary, 59/60/61 s re-entries,
+  interval measured from uncounted entries, pair independence).
+- Catalog tests: the real `stores.json` loads the five stores with exact
+  coordinates; empty or invalid definitions fail startup.
+- Service tests with Mockito: orchestration, failure propagation, and that only
+  reports which advanced travel state reach store evaluation.
 - Controller and JSON slice tests: binding, validation, status codes, Problem Details.
 - PostgreSQL integration tests: duplicate suppression (including eight concurrent
   identical requests), millisecond truncation and migration SQL, rollback with retry,
   same-courier lock waits observed through `pg_stat_activity`, independent courier
-  progress, concurrent first reports, registration races, OpenAPI document contents.
+  progress, concurrent first reports, registration races, OpenAPI document contents,
+  store entries through HTTP (counted/uncounted chain, stale and duplicate reports,
+  rollback of the whole transaction, courier independence, eight concurrent
+  reports inside a store yielding exactly one entry).
 
 ## Documentation
 
@@ -246,8 +326,7 @@ Coverage:
 
 ## Remaining work
 
-- Add `stores.json` to the project and load the five supplied stores.
-- Implement store-entry detection per ADR-009 within the existing per-courier
-  transaction: pair proximity state, counted/uncounted `StoreEntry` persistence,
-  and entry logging. Milestone M5 in the [roadmap](docs/roadmap.md).
-- Final delivery checks: end-to-end scenario, clean build, documentation review.
+- Delivery polish (milestone M7): end-to-end walkthrough against a fresh database,
+  clean build, final documentation review.
+- Optional: a plain HTML test page (M8) and container/CI packaging, subject to
+  owner decision.

@@ -13,7 +13,7 @@ public class OpenApiConfiguration {
                 .title("Courier Tracking API")
                 .version("v1")
                 .description("Register a courier, list couriers, then submit locations. "
-                        + "Location submission accumulates distance; query the persisted total in meters. "
-                        + "Store-entry processing is not implemented yet."));
+                        + "Location submission accumulates distance and records entries into Migros store areas; "
+                        + "query the persisted total distance in meters."));
     }
 }

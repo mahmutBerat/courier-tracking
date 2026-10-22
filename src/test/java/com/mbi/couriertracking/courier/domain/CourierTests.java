@@ -9,8 +9,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 class CourierTests {
 
@@ -33,10 +32,10 @@ class CourierTests {
     @ValueSource(longs = {-1, 0})
     void ignoredLocationDoesNotBecomeNextSegmentOrigin(long offsetSeconds) {
         var courier = new Courier("courier-1");
-        courier.updateDistance(new GeoLocation(0, 0), start, distance);
-        courier.updateDistance(new GeoLocation(0, 1), start.plusSeconds(2), distance);
-        courier.updateDistance(new GeoLocation(50, 50), start.plusSeconds(2 + offsetSeconds), distance);
-        courier.updateDistance(new GeoLocation(0, 2), start.plusSeconds(3), distance);
+        assertTrue(courier.updateDistance(new GeoLocation(0, 0), start, distance));
+        assertTrue(courier.updateDistance(new GeoLocation(0, 1), start.plusSeconds(2), distance));
+        assertFalse(courier.updateDistance(new GeoLocation(50, 50), start.plusSeconds(2 + offsetSeconds), distance));
+        assertTrue(courier.updateDistance(new GeoLocation(0, 2), start.plusSeconds(3), distance));
 
         assertEquals(222389.853289117, courier.getTotalDistanceMeters(), 0.000001);
         assertEquals(0.0, courier.getLastLatitude());

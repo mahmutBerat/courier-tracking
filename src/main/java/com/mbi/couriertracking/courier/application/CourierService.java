@@ -1,12 +1,14 @@
 package com.mbi.couriertracking.courier.application;
 
 import com.mbi.couriertracking.common.geo.DistanceCalculatorStrategy;
+import com.mbi.couriertracking.common.geo.GeoLocation;
 import com.mbi.couriertracking.courier.api.CourierLocationInput;
 import com.mbi.couriertracking.courier.domain.Courier;
 import com.mbi.couriertracking.courier.persistence.CourierLocationMapper;
 import com.mbi.couriertracking.courier.persistence.CourierLocationRecord;
 import com.mbi.couriertracking.courier.persistence.CourierLocationRepository;
 import com.mbi.couriertracking.courier.persistence.CourierRepository;
+import com.mbi.couriertracking.store.application.StoreEntryDetector;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
@@ -19,7 +21,7 @@ import java.util.List;
 import java.util.OptionalDouble;
 
 /**
- * Stores distinct inputs and advances current travel state atomically.
+ * Stores distinct inputs, advances travel state, and detects store entries in one transaction.
  */
 @Service
 @RequiredArgsConstructor
@@ -30,6 +32,7 @@ public class CourierService {
     private final CourierLocationMapper locationMapper;
     private final CourierRepository courierRepository;
     private final DistanceCalculatorStrategy distanceCalculator;
+    private final StoreEntryDetector storeEntryDetector;
 
     @Transactional
     public void createCourier(String courierId) {
@@ -53,8 +56,13 @@ public class CourierService {
             log.debug("Location data already inserted {}", input);
             return;
         }
-        courier.updateDistance(locationMapper.toGeoLocation(record), record.getTime(), distanceCalculator);
-        // TODO: Detect store entries and apply the per-pair one-minute counting rule.
+
+        GeoLocation location = locationMapper.toGeoLocation(record);
+
+        boolean isUpdated = courier.updateDistance(location, record.getTime(), distanceCalculator);
+        if (isUpdated) {
+            storeEntryDetector.detectEntries(courier.getCourierId(), location, record.getTime());
+        }
     }
 
     @Transactional(readOnly = true)

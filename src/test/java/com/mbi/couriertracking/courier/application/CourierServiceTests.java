@@ -1,11 +1,13 @@
 package com.mbi.couriertracking.courier.application;
 
+import com.mbi.couriertracking.common.geo.GeoLocation;
 import com.mbi.couriertracking.common.geo.HaversineDistanceCalculatorStrategy;
 import com.mbi.couriertracking.courier.api.CourierLocationInput;
 import com.mbi.couriertracking.courier.domain.Courier;
 import com.mbi.couriertracking.courier.persistence.CourierLocationMapperImpl;
 import com.mbi.couriertracking.courier.persistence.CourierLocationRepository;
 import com.mbi.couriertracking.courier.persistence.CourierRepository;
+import com.mbi.couriertracking.store.application.StoreEntryDetector;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -33,6 +35,8 @@ class CourierServiceTests {
     private CourierLocationRepository inputs;
     @Mock
     private CourierRepository couriers;
+    @Mock
+    private StoreEntryDetector storeEntryDetector;
     private CourierService service;
     private final CourierLocationInput input = new CourierLocationInput(
             Instant.parse("2026-10-21T12:00:00.123456Z"), "courier-1", 40.9923307, 29.1244229);
@@ -40,7 +44,7 @@ class CourierServiceTests {
     @BeforeEach
     void setUp() {
         service = new CourierService(inputs, new CourierLocationMapperImpl(),
-                couriers, new HaversineDistanceCalculatorStrategy());
+                couriers, new HaversineDistanceCalculatorStrategy(), storeEntryDetector);
     }
 
     @Test
@@ -67,6 +71,31 @@ class CourierServiceTests {
         assertNull(courier.getLastLatitude());
         assertEquals(0.0, courier.getTotalDistanceMeters());
         verify(couriers, never()).insertIfAbsent(any());
+        verifyNoInteractions(storeEntryDetector);
+    }
+
+    @Test
+    void processedInputIsEvaluatedForStoreEntriesWithItsOwnTime() {
+        var courier = new Courier("courier-1");
+        when(couriers.findForUpdate("courier-1")).thenReturn(Optional.of(courier));
+        when(inputs.insertIfAbsent(any())).thenReturn(1);
+
+        service.submitLocation(input);
+
+        verify(storeEntryDetector).detectEntries("courier-1", new GeoLocation(input.lat(), input.lng()),
+                Instant.parse("2026-10-21T12:00:00.123Z"));
+    }
+
+    @Test
+    void staleInputIsStoredButNotEvaluatedForStoreEntries() {
+        var courier = new Courier("courier-1");
+        courier.updateDistance(new GeoLocation(0, 0), input.time().plusSeconds(10), new HaversineDistanceCalculatorStrategy());
+        when(couriers.findForUpdate("courier-1")).thenReturn(Optional.of(courier));
+        when(inputs.insertIfAbsent(any())).thenReturn(1);
+
+        service.submitLocation(input);
+
+        verifyNoInteractions(storeEntryDetector);
     }
 
     @Test
@@ -116,8 +145,8 @@ class CourierServiceTests {
     void distanceQueryReadsStoredTotalWithoutHistory() {
         var courier = new Courier("courier-1");
         var calculator = new HaversineDistanceCalculatorStrategy();
-        courier.updateDistance(new com.mbi.couriertracking.common.geo.GeoLocation(0, 0), input.time(), calculator);
-        courier.updateDistance(new com.mbi.couriertracking.common.geo.GeoLocation(0, 1), input.time().plusSeconds(1), calculator);
+        courier.updateDistance(new GeoLocation(0, 0), input.time(), calculator);
+        courier.updateDistance(new GeoLocation(0, 1), input.time().plusSeconds(1), calculator);
         when(couriers.findById("courier-1")).thenReturn(Optional.of(courier));
 
         assertThat(service.findTotalDistanceMeters("courier-1")).hasValue(courier.getTotalDistanceMeters());

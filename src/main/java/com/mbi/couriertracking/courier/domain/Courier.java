@@ -13,7 +13,9 @@ import lombok.NoArgsConstructor;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
-/** Current travel state; input history is not needed to advance it. */
+/**
+ * Current travel state; input history is not needed to advance it.
+ */
 @Entity
 @Table(name = "couriers")
 @Getter
@@ -43,21 +45,27 @@ public class Courier {
         this.courierId = courierId;
     }
 
-    public void updateDistance(GeoLocation location, Instant inputTime, DistanceCalculatorStrategy calculator) {
+    /**
+     * Adds the segment from the last processed location when the report is strictly newer.
+     *
+     * @return true when the report advanced travel state; false when it was older or same-time and ignored
+     */
+    public boolean updateDistance(GeoLocation location, Instant inputTime, DistanceCalculatorStrategy calculator) {
         Instant time = inputTime.truncatedTo(ChronoUnit.MILLIS);
         if (lastProcessedTime != null && !time.isAfter(lastProcessedTime)) {
-            return;
+            return false;
         }
 
-        double segment = lastProcessedTime == null ? 0
-                : calculator.distanceMeters(new GeoLocation(lastLatitude, lastLongitude), location);
-        double updatedTotal = totalDistanceMeters + segment;
-        if (segment < 0 || !Double.isFinite(updatedTotal)) {
+        double distance = lastProcessedTime == null ? 0 : calculator.distanceMeters(new GeoLocation(lastLatitude, lastLongitude), location);
+        double updatedTotal = totalDistanceMeters + distance;
+
+        if (distance < 0 || !Double.isFinite(updatedTotal)) {
             throw new IllegalStateException("Distance calculation must produce a finite nonnegative total.");
         }
         totalDistanceMeters = updatedTotal;
         lastLatitude = location.latitude();
         lastLongitude = location.longitude();
         lastProcessedTime = time;
+        return true;
     }
 }
