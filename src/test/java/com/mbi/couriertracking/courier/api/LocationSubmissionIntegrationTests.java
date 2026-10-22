@@ -5,6 +5,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import com.mbi.couriertracking.TestcontainersConfiguration;
 import com.mbi.couriertracking.courier.persistence.CourierLocationRepository;
+import com.mbi.couriertracking.courier.persistence.CourierRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -49,7 +50,7 @@ class LocationSubmissionIntegrationTests {
     private CourierLocationRepository repository;
 
     @Autowired
-    private com.mbi.couriertracking.courier.persistence.CourierRepository courierRepository;
+    private CourierRepository courierRepository;
 
     @BeforeEach
     void clearInputs() {

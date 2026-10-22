@@ -1,188 +1,253 @@
 # Courier Tracking API
 
-A Java and Spring Boot REST API for tracking courier locations, accumulating travel
-distance, and detecting entries into Migros store areas. The project uses
-PostgreSQL transactions for consistent courier state and develops one API at a
-time from documented decisions and acceptance examples.
+A Java and Spring Boot REST API that receives streaming courier locations,
+accumulates each courier's travel distance, and (next increment) detects entries
+into Migros store areas. Courier state is kept consistent with PostgreSQL
+transactions; every behavior is backed by unit and integration tests.
 
-Courier registration/listing, location submission, travel-distance accumulation,
-and distance queries are implemented. Store catalog and store-entry processing
-remain pending. This
-README describes the current implementation and points reviewers to the decisions,
-verification evidence, and remaining work.
+**Status:** courier registration/listing, location submission, duplicate
+suppression, travel-distance accumulation, and distance queries are implemented.
+Store catalog loading and store-entry detection are the remaining case-study
+scope; see [Remaining work](#remaining-work).
 
 ## Key capabilities
 
 - Register couriers explicitly and list registered courier IDs.
-- Persist distinct location reports for registered couriers for traceability.
-- Suppress exact duplicates using a database unique constraint and native
+- Persist every distinct location report for traceability.
+- Suppress exact duplicates with a database unique constraint and native
   `INSERT ... ON CONFLICT DO NOTHING`.
 - Accumulate Haversine distance in meters from each courier's last processed location.
-- Retain delayed and same-time distinct reports without changing travel state.
-- Commit input storage and courier state together, with `SELECT FOR UPDATE` to
-  serialize updates for the same courier.
-- Validate coordinates and required API fields, with Problem Details for errors.
-- Manage schema changes through Liquibase and verify persistence against real
-  PostgreSQL using Testcontainers.
+- Keep delayed and same-time reports without letting them change travel state.
+- Commit input storage and courier state in one transaction, serialized per courier
+  with `SELECT FOR UPDATE`.
+- Validate coordinates and required fields; report errors as RFC 9457 Problem Details.
+- Manage schema with Liquibase; verify persistence against real PostgreSQL with Testcontainers.
+- Swagger UI, OpenAPI JSON/YAML, and an ordered curl walkthrough.
 
-## Reviewer reading guide
+## Architecture
 
-| Read | What it explains |
-|---|---|
-| [Initial decisions](docs/initial-decisions.md) | Case study requirements, shared domain language, accepted choices, and their evolution |
-| [Application structure — S003](docs/specs/003-application-structure.md) | Responsibilities, aggregate boundaries, Strategy and Repository decisions |
-| [Location submission — S004](docs/specs/004-location-submission.md) | Input persistence, duplicate identity, millisecond precision, and migration evidence |
-| [Travel distance — S005](docs/specs/005-travel-distance-processing.md) | Ordering examples, transaction and locking trade-offs, implementation, and test evidence |
-| [API contract — S002](docs/specs/002-api-contract-and-controllers.md) | HTTP contracts and the distinction between controller tests and implemented backend behavior |
-| [Courier registration — S006](docs/specs/006-courier-registration.md) | Explicit creation/listing and unknown-courier handling, superseding automatic creation |
-| [Roadmap](docs/roadmap.md) | Current progress and remaining delivery scope |
-
-Specifications distinguish proposed choices, accepted decisions, implemented
-behavior, and verified behavior. For detailed API examples, mapping conventions,
-and package responsibilities, see the [implementation guide](docs/implementation-guide.md).
-The [documentation index](docs/README.md) also links the development workflow,
-local skills, and review checklist.
-
-## Architecture and design patterns
-
-The application uses feature-based packages under `com.mbi.couriertracking`:
+Feature-first modular monolith under `com.mbi.couriertracking`:
 
 ```text
 courier/
-  api/           Controllers, request/response records, response mapping
-  application/   Use-case orchestration and transaction boundaries
-  domain/        Courier travel state and ordering rules
-  persistence/   Input records, Spring Data repositories, persistence mapping
+  api/           Controller, request/response records, response mapper, exception advice
+  application/   CourierService: use-case orchestration and transaction boundary
+  domain/        Courier aggregate: travel ordering and accumulation rules
+  persistence/   Input history record, Spring Data repositories, persistence mapper
 common/
-  geo/           Validated coordinates and distance calculation Strategy
+  geo/           GeoLocation value object and distance Strategy (Haversine)
   mapping/       Shared MapStruct configuration
+  api/           OpenAPI configuration
 ```
 
-Controllers call the concrete `CourierService`. The service coordinates persistence
-and invokes `Courier`, which owns its last processed location/time and total
-distance. Domain operations do not access repositories. Store packages will be
-introduced with the store implementation.
+The controller calls the concrete `CourierService`. The service loads and locks
+the courier, stores the input, and invokes `Courier.updateDistance`, which owns the
+ordering and accumulation rules. Domain objects never access repositories or HTTP
+types. A `store` feature package will be added with store-entry detection.
 
-| Pattern | Implementation and purpose |
-|---|---|
-| Strategy | `DistanceCalculatorStrategy` separates distance calculation from courier rules; `HaversineDistanceCalculatorStrategy` implements the spherical calculation |
-| Repository | Spring Data JPA interfaces provide persistence operations directly, without an additional repository adapter layer |
+### Design patterns
 
-## Processing and consistency decisions
-
-Couriers must be registered before submitting locations. Unknown courier IDs return
-`404` without storing input.
-
-A report's identity is `(courier, time, lat, lng)`, with time truncated to
-milliseconds. An exact repeat returns `204` without another input row or distance
-update. Duplicate reports also acquire the courier lock. No idempotency header or cache layer is required; cache optimization is
-recorded as a future TODO.
-
-The first processed location initializes distance to zero. A strictly newer input
-adds the distance from the last processed location and advances courier state.
-Older or same-time distinct reports remain in input history but do not affect
-calculation. Normal calculations use persisted courier state without replaying
-input history.
-
-Input insertion and courier advancement share one transaction. Courier-row locking
-prevents concurrent requests from losing updates; failures roll back both writes.
-The transaction has a five-second timeout. Requests are not sorted by event time,
-and contention for a busy courier can cause waits or timeouts. See
-[S005](docs/specs/005-travel-distance-processing.md) for the alternatives considered
-and PostgreSQL concurrency tests.
-
-Distance is the sum of Haversine segments between sampled coordinates, using a
-6,371,000-meter Earth radius. It is not a road-route calculation; sampling frequency
-and GPS accuracy affect the result.
-
-## Technology stack
-
-| Area | Technology |
-|---|---|
-| Runtime | Java 25, Spring Boot 4.1.1 |
-| HTTP and validation | Spring Web MVC, Jakarta Validation |
-| Persistence | PostgreSQL 18, Spring Data JPA, Hibernate |
-| Migrations | Liquibase; native SQL changeSets in one master XML |
-| Mapping and injection | MapStruct 1.6.3, Lombok |
-| Health | Spring Boot Actuator |
-| Testing | JUnit, Mockito, Spring Boot Test, PostgreSQL Testcontainers |
-| Build and local execution | Gradle Wrapper, GNU Make, Docker Compose |
+| Pattern    | Where                                                                | Purpose                                                                                                                                      |
+|------------|----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| Strategy   | `DistanceCalculatorStrategy` / `HaversineDistanceCalculatorStrategy` | Keeps the geographic formula replaceable and the `Courier` aggregate independent of it; the same strategy will serve courier–store proximity |
+| Repository | `CourierRepository`, `CourierLocationRepository` (Spring Data JPA)   | Encapsulates persistence of current courier state and input history behind interfaces used only by the application service                   |
 
 ## API overview
 
-| Method | Endpoint | Current behavior |
-|---|---|---|
-| POST | `/api/v1/couriers` | Register an ID; `201`, or `409` if already registered |
-| GET | `/api/v1/couriers` | Sorted array of courier IDs; `[]` for an empty registry |
-| POST | `/api/v1/couriers/locations` | Persist input and update travel distance; `204` after commit, including duplicates |
-| GET | `/api/v1/couriers/distance?courierId=...` | `200` with persisted distance; `0` before any location; `404` for unknown couriers |
-| GET | `/actuator/health` | Application health |
+| Method | Endpoint                                  | Behavior                                                                                                                                                |
+|--------|-------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
+| POST   | `/api/v1/couriers`                        | Register an ID: `201`; `409` if it exists; `400` if blank                                                                                               |
+| GET    | `/api/v1/couriers`                        | Sorted array of `{"courierId"}`; `[]` when empty                                                                                                        |
+| POST   | `/api/v1/couriers/locations`              | Store the report and update travel distance: `204` (also for exact duplicates); `400` invalid fields/coordinates; `404` unknown courier; `415` non-JSON |
+| GET    | `/api/v1/couriers/distance?courierId=...` | `200` `{"courierId","distanceMeters"}` (zero before any location); `404` unknown courier; `400` missing/blank parameter                                 |
+| GET    | `/actuator/health`                        | Application health                                                                                                                                      |
 
-POST accepts `time`, `courier`, `lat`, and `lng`. Required-field or coordinate
-validation failures return `400`; non-JSON POST requests return `415`.
-See the [API examples and response details](docs/implementation-guide.md#api-controller-increment).
+POST location body: `{"time":"2026-10-21T12:00:00Z","courier":"courier-1","lat":40.9923307,"lng":29.1244229}`.
+`time` is a UTC instant (explicit offsets are normalized); latitude must be within
+[-90, 90] and longitude within [-180, 180]. See [Swagger and curl examples](docs/api-examples.md).
 
-## Swagger and curl examples
+## Processing rules in brief
 
-After `make run`, open [Swagger UI](http://localhost:8080/swagger-ui/index.html)
-to invoke every API with example payloads. The
-[OpenAPI JSON](http://localhost:8080/v3/api-docs) and
-[YAML](http://localhost:8080/v3/api-docs.yaml) are also available.
+1. The courier must exist; unknown IDs get `404` and nothing is stored.
+2. A report's identity is `(courier, time truncated to milliseconds, lat, lng)`.
+   An exact repeat returns `204` without a new row or state change.
+3. The first processed report initializes the courier at zero distance.
+4. A report whose time is strictly later than the courier's last processed time
+   adds the Haversine distance from the last processed location and becomes the
+   new last location/time. Older or same-time distinct reports are stored but do
+   not change travel state; the next segment still starts from the last processed location.
+5. Input storage and courier state commit together; a failure rolls back both.
+6. Distance queries read persisted courier state only; input history is never replayed.
 
-Follow the [curl walkthrough](docs/api-examples.md) to check health, register and
-list couriers, submit locations, and call the distance endpoint. Examples include
-expected statuses and error cases. Distance queries return the persisted total in meters.
+## Architectural decisions
+
+Decisions are summarized here in ADR form. The linked specifications hold the
+detailed behavior, acceptance criteria, and verification evidence.
+
+### ADR-001: Modular monolith with feature-first packages
+
+- **Context:** One deployable with two closely related capabilities (courier travel,
+  store entries) sharing a transaction boundary.
+- **Decision:** A single Spring Boot application organized by feature
+  (`courier`, `store`, `common`), each with `api/application/domain/persistence`
+  layers created only when needed. Controllers call concrete services; no service
+  interfaces exist solely for injection or mocking.
+- **Alternatives:** Technical-layer packages; separate services per capability.
+- **Trade-offs:** Simple deployment and transactions, readable ownership per feature;
+  features cannot scale independently. Spec: [S003](docs/specs/003-application-structure.md).
+
+### ADR-002: API-first REST contract with Problem Details
+
+- **Context:** The case supplies the input fields (`time`, `courier`, `lat`, `lng`)
+  and a query for total distance.
+- **Decision:** Define the HTTP contract first: POST `/api/v1/couriers/locations`
+  returns `204`; GET `/api/v1/couriers/distance?courierId=` returns `200` with
+  `courierId` and `distanceMeters` or `404`; errors use RFC 9457 Problem Details via
+  Spring's `ResponseEntityExceptionHandler`. Courier IDs are strings; `time` binds
+  to `Instant`.
+- **Alternatives:** Courier ID as a path variable; custom error envelope with codes.
+- **Trade-offs:** Standard, tool-friendly error format with no custom envelope to
+  maintain; the query-parameter style keeps the courier ID out of the path at the
+  cost of a less conventional resource URL. Spec: [S002](docs/specs/002-api-contract-and-controllers.md).
+
+### ADR-003: Input history separate from current state
+
+- **Context:** Every report should be traceable, but calculations must stay cheap
+  and must not depend on replaying history.
+- **Decision:** Store each distinct report in `courier_location_inputs` (write-only
+  for normal processing). Keep the current calculation state (last location, last
+  processed time, total distance) on the `Courier` aggregate in `couriers`.
+  Queries read `couriers` only.
+- **Alternatives:** Recompute totals from history on each query; event sourcing.
+- **Trade-offs:** O(1) reads and writes per report and a clear audit trail; a bug in
+  accumulation cannot be corrected by re-reading history without an explicit
+  replay tool, which is deliberately out of scope.
+  Spec: [S004](docs/specs/004-location-submission.md), [S005](docs/specs/005-travel-distance-processing.md).
+
+### ADR-004: Database-level duplicate suppression
+
+- **Context:** Streaming clients retry; the same report may arrive more than once,
+  including concurrently.
+- **Decision:** Report identity is `(courier, time truncated to milliseconds, lat, lng)`,
+  enforced by a unique constraint and a native `INSERT ... ON CONFLICT DO NOTHING`.
+  Duplicates return `204` and skip all calculation. No idempotency header, no cache.
+- **Alternatives:** Client-supplied `Idempotency-Key`; in-memory recent-report cache;
+  preliminary `SELECT` before insert.
+- **Trade-offs:** Correct across concurrent requests, restarts, and multiple
+  instances with one statement; identity is content-based, so a genuinely new
+  report with identical content is indistinguishable from a retry (accepted for
+  GPS data). Millisecond precision discards finer fractions. Spec: [S004](docs/specs/004-location-submission.md).
+
+### ADR-005: Per-courier pessimistic locking in one short transaction
+
+- **Context:** Concurrent reports for the same courier must not lose accumulated
+  distance; input storage and state update must be atomic.
+- **Decision:** `CourierService.submitLocation` runs in one transaction: load the
+  courier row with `SELECT ... FOR UPDATE`, insert the input, apply the domain
+  operation, and let JPA flush at commit. Couriers are independent lock scopes.
+  Courier creation is a conflict-safe `INSERT ... ON CONFLICT DO NOTHING`.
+- **Alternatives:** Optimistic `@Version` with bounded retry; conditional SQL
+  `UPDATE ... WHERE last_processed_time < ?`; JVM-local synchronization.
+- **Trade-offs:** No retry logic and no lost updates across instances; a busy
+  courier serializes its writers and holds a connection while waiting. No
+  transaction timeout is configured; contention behavior is left to the database
+  and connection pool defaults. Spec: [S005](docs/specs/005-travel-distance-processing.md).
+
+### ADR-006: Travel ordering by input time, strictly newer only
+
+- **Context:** Reports can arrive delayed or out of order; processing time is not
+  a reliable movement clock.
+- **Decision:** Compare each report's `time` (millisecond precision) with the
+  courier's last processed time. Only a strictly newer report adds a segment and
+  advances state; older or same-time distinct reports are stored but ignored for
+  distance. No re-sorting or recalculation of history.
+- **Alternatives:** Process in arrival order; buffer and sort by time; recompute
+  when a late report arrives.
+- **Trade-offs:** Deterministic and cheap; a late report that was genuinely part of
+  the route is not counted, so totals are a lower bound under heavy reordering.
+  Spec: [S005](docs/specs/005-travel-distance-processing.md).
+
+### ADR-007: Haversine distance behind a Strategy
+
+- **Context:** Both travel segments and store proximity need a distance in meters
+  between two coordinates.
+- **Decision:** `GeoLocation` is an immutable value object validating finite,
+  inclusive ranges. `DistanceCalculatorStrategy` is the abstraction;
+  `HaversineDistanceCalculatorStrategy` uses a spherical Earth with
+  R = 6,371,000 m, `double` precision, no display rounding, and clamps the
+  intermediate term against floating-point drift.
+- **Alternatives:** Vincenty/geodesic formulas; road-network routing; `BigDecimal`.
+- **Trade-offs:** Sub-meter accuracy at this scale with trivial cost; the result is
+  the sum of straight segments between samples, not the road distance traveled.
+  Spec: [S005](docs/specs/005-travel-distance-processing.md).
+
+### ADR-008: Explicit courier registration
+
+### ADR-009: Store entry semantics (accepted, not yet implemented)
+
+### ADR-010: PostgreSQL 18, Liquibase native SQL, Testcontainers
+
+## Technology stack
+
+| Area                      | Technology                                                             |
+|---------------------------|------------------------------------------------------------------------|
+| Runtime                   | Java 25, Spring Boot 4.1.1                                             |
+| HTTP and validation       | Spring Web MVC, Jakarta Validation                                     |
+| Persistence               | PostgreSQL 18, Spring Data JPA, Hibernate                              |
+| Migrations                | Liquibase, native SQL changeSets in one master XML                     |
+| Mapping and boilerplate   | MapStruct 1.6.3, Lombok                                                |
+| API documentation         | springdoc-openapi 3.1.1                                                |
+| Health                    | Spring Boot Actuator                                                   |
+| Testing                   | JUnit 5, Mockito, AssertJ, Spring Boot Test, PostgreSQL Testcontainers |
+| Build and local execution | Gradle Wrapper, GNU Make, Docker Compose                               |
 
 ## Run locally
 
-Install JDK 25, Docker Engine/Desktop, Docker Compose v2 with `--wait` support,
-and GNU Make. Start Docker, then run:
+Requirements: JDK 25, Docker Engine/Desktop with Compose v2, GNU Make.
 
 ```sh
 make run
 ```
 
-The application runs at `http://localhost:8080`; PostgreSQL runs in Compose.
-Check health from another terminal:
+This starts PostgreSQL, waits for its health check, and runs the application on
+`http://localhost:8080`. Then open [Swagger UI](http://localhost:8080/swagger-ui/index.html)
+or follow the [curl walkthrough](docs/api-examples.md). Stop with `Ctrl+C` and
+`make down`. All commands, environment variables, IDE setup, and troubleshooting
+are in the [development guide](docs/development-guide.md).
 
-```sh
-curl --fail http://localhost:8080/actuator/health
-```
-
-Stop the application with `Ctrl+C`, then run `make down` to stop PostgreSQL.
-Database data remains in its named volume. The first run needs internet access
-for dependencies and the database image. See the
-[local development guide](docs/development-guide.md) for all commands, environment
-variables, IDE setup, migration details, and troubleshooting.
-
-## Testing and verification
+## Testing
 
 ```sh
 make test
 ```
 
-Docker is required. Integration tests use an independent PostgreSQL 18
-Testcontainers database; `make up` is unnecessary. Unit and MVC tests cover domain
-rules, validation, mapping, and the HTTP contract. PostgreSQL tests cover duplicate
-suppression, persistence, rollback, concurrent updates, and lock timeout/retry.
+Docker is required; integration tests start their own PostgreSQL 18 container.
+Coverage:
 
-The latest recorded full-suite run passed 101 tests;
-[S008](docs/specs/008-distance-query.md) records the latest run and distance-query checks. See
-[S005 verification evidence](docs/specs/005-travel-distance-processing.md#post-implementation-and-verification-evidence)
-for scope and limitations: reloads were tested across transactions, but a full
-application-process restart and throughput benchmark have not been performed.
-Registration and listing are covered by [S006](docs/specs/006-courier-registration.md).
-Docker-free controller test commands are in the
-[implementation guide](docs/implementation-guide.md#api-controller-increment).
+- Domain and geography unit tests: ordering, accumulation, invalid results,
+  coordinate validation, Haversine known distances and edge cases.
+- Controller and JSON slice tests: binding, validation, status codes, Problem Details.
+- PostgreSQL integration tests: duplicate suppression (including eight concurrent
+  identical requests), millisecond truncation and migration SQL, rollback with retry,
+  same-courier lock waits observed through `pg_stat_activity`, independent courier
+  progress, concurrent first reports, registration races, OpenAPI document contents.
+
+## Documentation
+
+| Document                                             | Purpose                                                       |
+|------------------------------------------------------|---------------------------------------------------------------|
+| [Documentation index](docs/README.md)                | Working cycle, specification conventions, document map        |
+| [Initial decisions](docs/initial-decisions.md)       | Case requirements, interpretation, shared domain language     |
+| [Roadmap](docs/roadmap.md)                           | Milestones, progress, remaining work                          |
+| [Specifications](docs/specs)                         | Behavior, acceptance criteria, and verification per increment |
+| [API examples](docs/api-examples.md)                 | Swagger and ordered curl requests with expected responses     |
+| [Development guide](docs/development-guide.md)       | Commands, configuration, migrations, troubleshooting          |
+| [Implementation guide](docs/implementation-guide.md) | Conventions for Lombok, MapStruct, packages, geography        |
 
 ## Remaining work
 
-- Load the supplied store catalog and implement store-entry detection and logging.
-  Accepted entry rules include an inclusive 100-meter boundary and a 60-second
-  reentry rule based on the previous physical entry; details are recorded in
-  [S001](docs/specs/001-location-and-entry-semantics.md).
-- Complete API integration and delivery acceptance checks.
-- Add the requested plain HTML page for manually testing location submission and
-  distance queries as the final roadmap step.
-
-The [roadmap](docs/roadmap.md) tracks these items and their dependencies.
+- Add `stores.json` to the project and load the five supplied stores.
+- Implement store-entry detection per ADR-009 within the existing per-courier
+  transaction: pair proximity state, counted/uncounted `StoreEntry` persistence,
+  and entry logging. Milestone M5 in the [roadmap](docs/roadmap.md).
+- Final delivery checks: end-to-end scenario, clean build, documentation review.
