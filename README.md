@@ -1,5 +1,11 @@
 # Courier Tracking API
 
+[![CI](https://github.com/mahmutBerat/courier-tracking/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mahmutBerat/courier-tracking/actions/workflows/ci.yml)
+![Java](https://img.shields.io/badge/Java-25-orange)
+![Spring Boot](https://img.shields.io/badge/Spring_Boot-4.1.1-6DB33F)
+![Gradle](https://img.shields.io/badge/Gradle-9.8.1-02303A)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1)
+
 A Java and Spring Boot REST API that receives streaming courier locations,
 accumulates each courier's travel distance, and detects entries into Migros store
 areas. Courier state is kept consistent with PostgreSQL transactions; every
@@ -258,6 +264,24 @@ detailed behavior, acceptance criteria, and verification evidence.
 - **Trade-offs:** Tests prove the actual production semantics; Docker and JDK 25
   are required to run and test the project.
 
+### ADR-012: GitHub Actions CI, JaCoCo coverage, and a Compose-packaged application
+
+- **Context:** The reviewer should be able to see the suite pass and run the
+  whole stack without a local JDK. The reference project established CI, coverage,
+  and container packaging as practices worth carrying over.
+- **Decision:** A GitHub Actions workflow runs `./gradlew clean build` on pushes
+  to `main`, pull requests, and manual dispatch, publishes test and JaCoCo reports
+  as artifacts, and posts a quality summary. JaCoCo finalizes the `test` task. A
+  multi-stage Dockerfile builds a non-root runtime image, and Compose runs it as an
+  `app` service next to PostgreSQL through `make stack-up`.
+- **Alternatives:** No CI; SpotBugs static analysis as in the reference (a
+  non-blocking report there); a standalone image without a Compose service; a
+  Postman collection alongside Swagger.
+- **Trade-offs:** CI exercises the real PostgreSQL Testcontainers suite on the
+  runner's Docker daemon, so runs take minutes rather than seconds. SpotBugs,
+  tracing headers, and a Postman collection are left out to keep the delivery
+  focused; coverage is reported, not enforced as a threshold.
+
 ## Technology stack
 
 | Area                      | Technology                                                             |
@@ -270,7 +294,8 @@ detailed behavior, acceptance criteria, and verification evidence.
 | API documentation         | springdoc-openapi 3.1.1                                                |
 | Health                    | Spring Boot Actuator                                                   |
 | Testing                   | JUnit 5, Mockito, AssertJ, Spring Boot Test, PostgreSQL Testcontainers |
-| Build and local execution | Gradle Wrapper, GNU Make, Docker Compose                               |
+| Coverage and CI           | JaCoCo, GitHub Actions                                                 |
+| Build and local execution | Gradle Wrapper, GNU Make, Docker Compose, multi-stage Dockerfile       |
 
 ## Run locally
 
@@ -286,6 +311,16 @@ or follow the [curl walkthrough](docs/api-examples.md). Stop with `Ctrl+C` and
 `make down`. All commands, environment variables, IDE setup, and troubleshooting
 are in the [development guide](docs/development-guide.md).
 
+To run the whole stack in containers without a local JDK:
+
+```sh
+make stack-up
+```
+
+This builds the application image from the Dockerfile and starts PostgreSQL and
+the application on `http://localhost:8080`. Follow logs with `make stack-logs`
+and stop with `make down`.
+
 ## Testing
 
 ```sh
@@ -293,6 +328,8 @@ make test
 ```
 
 Docker is required; integration tests start their own PostgreSQL 18 container.
+The `test` task finalizes with a JaCoCo report at
+`build/reports/jacoco/test/html/index.html`.
 Coverage:
 
 - Domain and geography unit tests: travel ordering and accumulation, invalid
@@ -312,6 +349,15 @@ Coverage:
   rollback of the whole transaction, courier independence, eight concurrent
   reports inside a store yielding exactly one entry).
 
+## Continuous integration
+
+The [GitHub Actions workflow](https://github.com/mahmutBerat/courier-tracking/actions/workflows/ci.yml)
+runs `./gradlew clean build` for pushes to `main`, pull requests targeting `main`,
+and manual dispatches. Integration tests run against PostgreSQL Testcontainers on
+the runner. Each run publishes the test and JaCoCo reports as artifacts, writes a
+quality summary to the run page, and keeps one updated summary comment on pull
+requests.
+
 ## Documentation
 
 | Document                                             | Purpose                                                       |
@@ -328,5 +374,6 @@ Coverage:
 
 - Delivery polish (milestone M7): end-to-end walkthrough against a fresh database,
   clean build, final documentation review.
-- Optional: a plain HTML test page (M8) and container/CI packaging, subject to
-  owner decision.
+- Optional: a plain HTML test page (M8), subject to owner decision.
+- Not planned for this delivery: SpotBugs static analysis, trace correlation
+  headers, OTLP export, and a Postman collection.

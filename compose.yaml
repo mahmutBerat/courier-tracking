@@ -18,5 +18,18 @@ services:
       retries: 30
       start_period: 5s
 
+  app:
+    build: .
+    image: courier-tracking:local
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${DB_NAME:-courier_tracking}
+      SPRING_DATASOURCE_USERNAME: ${DB_USER:-courier_tracking}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-courier_tracking_local}
+    ports:
+      - "127.0.0.1:${SERVER_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
