@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Courier Tracking Demo</title>
+<style>
+  body { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 14px; margin: 0; padding: 16px; max-width: 980px; color: #222; background: #fff; }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  h2 { font-size: 16px; margin: 28px 0 8px; border-top: 1px solid #ddd; padding-top: 12px; }
+  p { margin: 4px 0; }
+  label { display: inline-block; min-width: 90px; }
+  input[type=text] { width: 320px; padding: 4px; font: inherit; }
+  textarea { width: 100%; box-sizing: border-box; padding: 4px; font: inherit; }
+  button { font: inherit; padding: 4px 10px; cursor: pointer; }
+  .step { border: 1px solid #ccc; padding: 10px; margin: 10px 0; }
+  .step .desc { color: #555; }
+  .meta { color: #666; }
+  pre { background: #f6f6f6; padding: 8px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; min-height: 1.2em; }
+  .ok { border-left: 6px solid #2a8f2a; }
+  .bad { border-left: 6px solid #c33; }
+  .toolbar { margin: 8px 0; }
+  .toolbar button { margin-right: 6px; }
+  small { color: #666; }
+  table { border-collapse: collapse; }
+  td, th { border: 1px solid #ddd; padding: 3px 8px; text-align: left; }
+</style>
+</head>
+<body>
+<h1>Courier Tracking API demo</h1>
+<p>Plain page mirroring <code>docs/api-examples.md</code>. Start the application with <code>make run</code>, then open
+<code>http://localhost:8080/demo.html</code>. Success cases only; each step shows the expected status and a green bar means the response matched it.</p>
+
+<p><label for="baseUrl">Base URL</label> <input type="text" id="baseUrl"></p>
+<p><label for="courierId">Courier ID</label> <input type="text" id="courierId">
+  <button type="button" onclick="newCourierId()">New ID</button>
+  <small>A fresh ID keeps each walkthrough independent; reusing an ID never resets its distance.</small></p>
+<div class="toolbar">
+  <button type="button" onclick="runAll()">Run steps 1–6 in order</button>
+  <button type="button" onclick="clearOutputs()">Clear outputs</button>
+</div>
+
+<h2>Walkthrough</h2>
+<div id="steps"></div>
+
+<h2>Custom location</h2>
+<div class="step" id="custom">
+  <p class="desc">Build your own scenario. Store buttons fill the coordinates of the supplied stores; a report within 100 m of a store is an entry.</p>
+  <p><label for="cTime">time</label> <input type="text" id="cTime" value="2026-10-21T12:02:00Z"></p>
+  <p><label for="cLat">lat</label> <input type="text" id="cLat" value="40.9923307"></p>
+  <p><label for="cLng">lng</label> <input type="text" id="cLng" value="29.1244229"></p>
+  <p>
+    <button type="button" onclick="fillStore(40.9923307, 29.1244229)">Ataşehir</button>
+    <button type="button" onclick="fillStore(40.986106, 29.1161293)">Novada</button>
+    <button type="button" onclick="fillStore(41.0066851, 28.6552262)">Beylikdüzü</button>
+    <button type="button" onclick="fillStore(41.055783, 29.0210292)">Ortaköy</button>
+    <button type="button" onclick="fillStore(40.9632463, 29.0630908)">Caddebostan</button>
+    <button type="button" onclick="addSeconds(30)">time +30 s</button>
+    <button type="button" onclick="addSeconds(60)">time +60 s</button>
+  </p>
+  <p><button type="button" onclick="sendCustom()">Send location</button>
+     <button type="button" onclick="runStep('distance')">Query distance</button>
+     <span class="meta">Expected: 204</span></p>
+  <pre id="out-custom"></pre>
+</div>
+
+<h2>Reference</h2>
+<table>
+  <tr><th>Store</th><th>lat</th><th>lng</th></tr>
+  <tr><td>Ataşehir MMM Migros</td><td>40.9923307</td><td>29.1244229</td></tr>
+  <tr><td>Novada MMM Migros</td><td>40.986106</td><td>29.1161293</td></tr>
+  <tr><td>Beylikdüzü 5M Migros</td><td>41.0066851</td><td>28.6552262</td></tr>
+  <tr><td>Ortaköy MMM Migros</td><td>41.055783</td><td>29.0210292</td></tr>
+  <tr><td>Caddebostan MMM Migros</td><td>40.9632463</td><td>29.0630908</td></tr>
+</table>
+<p><small>Store entries are not exposed through the API. Inspect them with <code>make db-shell</code> and
+<code>SELECT courier_id, store_name, entry_time, counted FROM store_entries ORDER BY entry_time;</code></small></p>
+
+<h2>Request log</h2>
+<pre id="log"></pre>
+
+<script>
+// Placeholders: {{courierId}} is replaced from the input at send time.
+const STEPS = [
+  { id: 'health', title: '1. Health', method: 'GET', path: '/actuator/health', expect: 200,
+    desc: 'JSON containing "status":"UP" when healthy.' },
+  { id: 'register', title: '2. Register a courier', method: 'POST', path: '/api/v1/couriers', expect: 201,
+    body: '{"courierId":"{{courierId}}"}',
+    desc: 'Empty body on success. Repeating the same request returns 409 and preserves state.' },
+  { id: 'list', title: '3. List couriers', method: 'GET', path: '/api/v1/couriers', expect: 200,
+    desc: 'Array of {"courierId"} ordered by ID; [] when empty.' },
+  { id: 'first', title: '4. Submit the first location (Ataşehir)', method: 'POST', path: '/api/v1/couriers/locations', expect: 204,
+    body: '{"time":"2026-10-21T12:00:00Z","courier":"{{courierId}}","lat":40.9923307,"lng":29.1244229}',
+    desc: 'Initializes last location/time with distance zero and records a counted entry for Ataşehir. Repeating it is a duplicate: 204, nothing stored.' },
+  { id: 'newer', title: '5. Submit a newer location (Novada)', method: 'POST', path: '/api/v1/couriers/locations', expect: 204,
+    body: '{"time":"2026-10-21T12:01:00Z","courier":"{{courierId}}","lat":40.986106,"lng":29.1161293}',
+    desc: 'Adds the Haversine segment from Ataşehir and records a counted entry for Novada.' },
+  { id: 'reenter', title: '5b. Re-enter Ataşehir after 90 s', method: 'POST', path: '/api/v1/couriers/locations', expect: 204,
+    body: '{"time":"2026-10-21T12:01:30Z","courier":"{{courierId}}","lat":40.9923307,"lng":29.1244229}',
+    desc: 'Recorded with counted=true because 90 s passed since the previous Ataşehir entry. Change the time to 12:00:30Z and the report is stale (stored, no state change).' },
+  { id: 'distance', title: '6. Query distance', method: 'GET', path: '/api/v1/couriers/distance?courierId={{courierId}}', expect: 200,
+    desc: 'Accumulated distance in meters from persisted courier state.' },
+];
+
+
+const ALL = STEPS;
+
+function byId(id) { return document.getElementById(id); }
+
+function newCourierId() {
+  byId('courierId').value = 'demo-' + new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + Math.floor(Math.random() * 1000);
+}
+
+function render(list, container) {
+  for (const s of list) {
+    const div = document.createElement('div');
+    div.className = 'step';
+    div.id = 'step-' + s.id;
+    let html = '<p><strong>' + s.title + '</strong> <span class="meta">' + s.method + ' ' + s.path + ' · expected ' + s.expect + '</span></p>'
+      + '<p class="desc">' + s.desc + '</p>';
+    if (s.body !== undefined) {
+      html += '<textarea id="body-' + s.id + '" rows="2">' + s.body + '</textarea>';
+    }
+    html += '<p><button type="button" onclick="runStep(\'' + s.id + '\')">Send</button></p><pre id="out-' + s.id + '"></pre>';
+    div.innerHTML = html;
+    container.appendChild(div);
+  }
+}
+
+function substitute(text) {
+  return text.replaceAll('{{courierId}}', byId('courierId').value.trim());
+}
+
+async function send(step, bodyText) {
+  const base = byId('baseUrl').value.trim().replace(/\/$/, '');
+  const url = base + substitute(step.path);
+  const init = { method: step.method, headers: {} };
+  if (bodyText !== undefined) {
+    init.headers['Content-Type'] = step.contentType || 'application/json';
+    init.body = bodyText;
+  }
+  const started = performance.now();
+  let status, text;
+  try {
+    const res = await fetch(url, init);
+    status = res.status;
+    text = await res.text();
+  } catch (e) {
+    status = 0;
+    text = 'Request failed: ' + e.message + '\nIs the application running at ' + base + '?';
+  }
+  const ms = Math.round(performance.now() - started);
+  let pretty = text;
+  try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
+  const line = 'HTTP ' + status + ' (' + ms + ' ms)' + (pretty ? '\n' + pretty : '\n<empty body>');
+  logLine(step.method + ' ' + url + (bodyText !== undefined ? '\n  ' + bodyText : '') + '\n  -> ' + status);
+  return { status, line };
+}
+
+async function runStep(id) {
+  const step = ALL.find(s => s.id === id);
+  const bodyEl = byId('body-' + id);
+  const bodyText = bodyEl ? substitute(bodyEl.value) : undefined;
+  const out = byId('out-' + id);
+  out.textContent = 'sending…';
+  const { status, line } = await send(step, bodyText);
+  out.textContent = line;
+  mark(byId('step-' + id), status === step.expect);
+}
+
+async function runAll() {
+  for (const s of STEPS) { await runStep(s.id); }
+}
+
+function mark(el, ok) {
+  el.classList.remove('ok', 'bad');
+  el.classList.add(ok ? 'ok' : 'bad');
+}
+
+async function sendCustom() {
+  const body = JSON.stringify({
+    time: byId('cTime').value.trim(),
+    courier: byId('courierId').value.trim(),
+    lat: Number(byId('cLat').value),
+    lng: Number(byId('cLng').value),
+  });
+  const step = { method: 'POST', path: '/api/v1/couriers/locations', expect: 204 };
+  const out = byId('out-custom');
+  out.textContent = 'sending…';
+  const { status, line } = await send(step, body);
+  out.textContent = line;
+  mark(byId('custom'), status === step.expect);
+}
+
+function fillStore(lat, lng) { byId('cLat').value = lat; byId('cLng').value = lng; }
+
+function addSeconds(seconds) {
+  const t = new Date(byId('cTime').value.trim());
+  if (isNaN(t)) { return; }
+  byId('cTime').value = new Date(t.getTime() + seconds * 1000).toISOString().replace('.000Z', 'Z');
+}
+
+function logLine(text) {
+  const log = byId('log');
+  log.textContent = new Date().toISOString().slice(11, 19) + ' ' + text + '\n\n' + log.textContent;
+}
+
+function clearOutputs() {
+  for (const s of ALL) { byId('out-' + s.id).textContent = ''; byId('step-' + s.id).classList.remove('ok', 'bad'); }
+  byId('out-custom').textContent = '';
+  byId('custom').classList.remove('ok', 'bad');
+  byId('log').textContent = '';
+}
+
+byId('baseUrl').value = location.protocol.startsWith('http') ? location.origin : 'http://localhost:8080';
+newCourierId();
+render(STEPS, byId('steps'));
+</script>
+</body>
+</html>

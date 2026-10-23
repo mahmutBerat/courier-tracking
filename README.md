@@ -318,7 +318,8 @@ make run
 
 This starts PostgreSQL, waits for its health check, and runs the application on
 `http://localhost:8080`. Then open [Swagger UI](http://localhost:8080/swagger-ui/index.html)
-or follow the [curl walkthrough](docs/api-examples.md). Stop with `Ctrl+C` and
+or follow the [curl walkthrough](docs/api-examples.md). For manual testing only,
+[demo.html](http://localhost:8080/demo.html) runs the success-path walkthrough from the browser. Stop with `Ctrl+C` and
 `make down`. All commands, environment variables, IDE setup, and troubleshooting
 are in the [development guide](docs/development-guide.md).
 
