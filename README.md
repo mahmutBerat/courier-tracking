@@ -29,7 +29,8 @@ query, and store-entry detection with the one-minute rule. See
 - Detect when a courier enters the 100 m area of any of the five supplied stores,
   apply the one-minute re-entry rule per courier–store pair, and record every entry
   with its counted flag in `store_entries`.
-- Validate coordinates and required fields; report errors as RFC 9457 Problem Details.
+- Validate coordinates and required fields; report every error with one uniform
+  `ErrorResponse` body (status, error, code, message, path, optional field errors).
 - Manage schema with Liquibase; verify persistence against real PostgreSQL with Testcontainers.
 - Swagger UI, OpenAPI JSON/YAML, and an ordered curl walkthrough.
 
@@ -119,19 +120,29 @@ detailed behavior, acceptance criteria, and verification evidence.
 - **Trade-offs:** Simple deployment and transactions, readable ownership per feature;
   features cannot scale independently. Spec: [S003](docs/specs/003-application-structure.md).
 
-### ADR-002: API-first REST contract with Problem Details
+### ADR-002: API-first REST contract with a uniform error body
 
 - **Context:** The case supplies the input fields (`time`, `courier`, `lat`, `lng`)
   and a query for total distance.
 - **Decision:** Define the HTTP contract first: POST `/api/v1/couriers/locations`
   returns `204`; GET `/api/v1/couriers/distance?courierId=` returns `200` with
-  `courierId` and `distanceMeters` or `404`; errors use RFC 9457 Problem Details via
-  Spring's `ResponseEntityExceptionHandler`. Courier IDs are strings; `time` binds
-  to `Instant`.
-- **Alternatives:** Courier ID as a path variable; custom error envelope with codes.
-- **Trade-offs:** Standard, tool-friendly error format with no custom envelope to
-  maintain; the query-parameter style keeps the courier ID out of the path at the
-  cost of a less conventional resource URL. Spec: [S002](docs/specs/002-api-contract-and-controllers.md).
+  `courierId` and `distanceMeters` or `404`. Courier IDs are strings; `time` binds
+  to `Instant`. Errors were first delivered as RFC 9457 Problem Details; amended on
+  2026-10-23 so that every error, including framework-generated `400` and `415`
+  responses, returns the project's `ErrorResponse` record (`status`, `error`,
+  `code`, `message`, `path`, optional `fieldErrors`) through `ApiExceptionHandler`,
+  which still extends `ResponseEntityExceptionHandler` and translates its bodies.
+  Application outcomes are domain exceptions (`CourierNotFoundException`,
+  `CourierAlreadyExistsException`) mapped to `404` and `409` in the handler.
+- **Alternatives:** Courier ID as a path variable; keeping Problem Details
+  (the original choice); a custom body only for application errors with framework
+  errors left as Problem Details.
+- **Trade-offs:** The custom body carries a stable `code` and field-level
+  violations that clients and the planned Kafka dead-letter handling can rely on,
+  at the cost of maintaining an envelope instead of the standard media type. One
+  shape for all errors avoids two formats on one API. The query-parameter style
+  keeps the courier ID out of the path at the cost of a less conventional resource
+  URL. Spec: [S002](docs/specs/002-api-contract-and-controllers.md).
 
 ### ADR-003: Input history separate from current state
 
@@ -340,7 +351,8 @@ Coverage:
   coordinates; empty or invalid definitions fail startup.
 - Service tests with Mockito: orchestration, failure propagation, and that only
   reports which advanced travel state reach store evaluation.
-- Controller and JSON slice tests: binding, validation, status codes, Problem Details.
+- Controller and JSON slice tests: binding, validation, status codes, the uniform
+  `ErrorResponse` body with codes and field errors.
 - PostgreSQL integration tests: duplicate suppression (including eight concurrent
   identical requests), millisecond truncation and migration SQL, rollback with retry,
   same-courier lock waits observed through `pg_stat_activity`, independent courier

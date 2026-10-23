@@ -14,7 +14,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DataAccessResourceFailureException;
-import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -102,9 +101,9 @@ class CourierServiceTests {
     void unknownCourierIsRejectedBeforeInputStorage() {
         when(couriers.findForUpdate("courier-1")).thenReturn(Optional.empty());
 
-        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+        CourierNotFoundException error = assertThrows(CourierNotFoundException.class,
                 () -> service.submitLocation(input));
-        assertEquals(404, error.getStatusCode().value());
+        assertEquals("courier-1", error.getCourierId());
         verifyNoInteractions(inputs);
     }
 
@@ -112,9 +111,9 @@ class CourierServiceTests {
     void duplicateRegistrationReturnsConflict() {
         when(couriers.insertIfAbsent("courier-1")).thenReturn(0);
 
-        ResponseStatusException error = assertThrows(ResponseStatusException.class,
+        CourierAlreadyExistsException error = assertThrows(CourierAlreadyExistsException.class,
                 () -> service.createCourier("courier-1"));
-        assertEquals(409, error.getStatusCode().value());
+        assertEquals("courier-1", error.getCourierId());
         verifyNoInteractions(inputs);
     }
 

@@ -11,9 +11,9 @@ public interface CourierLocationRepository extends JpaRepository<CourierLocation
     @Query(value = """
             INSERT INTO courier_location_inputs
                 (input_time, courier_id, latitude, longitude)
-            VALUES (:#{#record.time}, :#{#record.courierId},
-                    :#{#record.latitude}, :#{#record.longitude})
+            VALUES (:#{#courierLocationRecord.time}, :#{#courierLocationRecord.courierId},
+                    :#{#courierLocationRecord.latitude}, :#{#courierLocationRecord.longitude})
             ON CONFLICT ON CONSTRAINT uq_courier_location_input DO NOTHING
             """, nativeQuery = true)
-    int insertIfAbsent(@Param("record") CourierLocationRecord record);
+    int insertIfAbsent(@Param("courierLocationRecord") CourierLocationRecord courierLocationRecord);
 }

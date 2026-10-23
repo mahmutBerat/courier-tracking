@@ -1,5 +1,6 @@
 package com.mbi.couriertracking.courier.api;
 
+import com.mbi.couriertracking.courier.application.CourierNotFoundException;
 import com.mbi.couriertracking.courier.application.CourierService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -12,7 +13,6 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
-import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 
@@ -60,7 +60,7 @@ public class CourierController {
     @GetMapping("/distance")
     public TotalDistanceResponse getTotalDistance(@Parameter(description = "Registered courier ID", example = "courier-1") @RequestParam("courierId") @NotBlank String courierId) {
         double distanceMeters = courierService.findTotalDistanceMeters(courierId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Courier not found."));
+                .orElseThrow(() -> new CourierNotFoundException(courierId));
         return courierMapper.toTotalDistanceResponse(courierId, distanceMeters);
     }
 }
