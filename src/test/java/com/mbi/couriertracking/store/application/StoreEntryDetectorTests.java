@@ -71,8 +71,8 @@ class StoreEntryDetectorTests {
     @Test
     void existingPairStateDecidesWhetherTheReentryCounts() {
         StoreProximityState enteredThirtySecondsAgo = StoreProximityState.initial("courier-1", ATASEHIR.name());
-        enteredThirtySecondsAgo.checkStoreEntry(0, NOON.minusSeconds(30));
-        enteredThirtySecondsAgo.checkStoreEntry(500, NOON.minusSeconds(10));
+        enteredThirtySecondsAgo.checkProximity(0, NOON.minusSeconds(30));
+        enteredThirtySecondsAgo.checkProximity(500, NOON.minusSeconds(10));
         when(proximityStates.findByCourierId("courier-1")).thenReturn(List.of(enteredThirtySecondsAgo));
 
         detector.detectEntries("courier-1", ATASEHIR.location(), NOON);
@@ -94,17 +94,31 @@ class StoreEntryDetectorTests {
     }
 
     @Test
-    void stopsAtTheFirstStoreEnteredInCatalogOrder() {
-        // Two catalog entries at the same coordinates: a report can only enter one store.
-        Store sameSpot = new Store("Same spot", ATASEHIR.location());
-        detector = detectorFor(ATASEHIR, sameSpot);
-        when(proximityStates.findByCourierId("courier-1")).thenReturn(List.of());
+    void movingToAnotherStoreMarksTheLeftStoreOutsideAndRecordsTheNewEntry() {
+        // Novada follows Ataşehir in the catalog; its exit must be observed although Ataşehir was entered.
+        StoreProximityState insideNovada = StoreProximityState.initial("courier-1", NOVADA.name());
+        insideNovada.checkProximity(0, NOON.minusSeconds(120));
+        when(proximityStates.findByCourierId("courier-1")).thenReturn(List.of(insideNovada));
 
         detector.detectEntries("courier-1", ATASEHIR.location(), NOON);
 
+        assertFalse(insideNovada.isInside());
+        verify(proximityStates).save(insideNovada);
         ArgumentCaptor<StoreEntry> savedEntry = ArgumentCaptor.forClass(StoreEntry.class);
         verify(storeEntries, times(1)).save(savedEntry.capture());
         assertEquals(ATASEHIR.name(), savedEntry.getValue().getStoreName());
+    }
+
+    @Test
+    void stayingInsideAStoreSavesNothing() {
+        StoreProximityState insideAtasehir = StoreProximityState.initial("courier-1", ATASEHIR.name());
+        insideAtasehir.checkProximity(0, NOON.minusSeconds(30));
+        when(proximityStates.findByCourierId("courier-1")).thenReturn(List.of(insideAtasehir));
+
+        detector.detectEntries("courier-1", ATASEHIR.location(), NOON);
+
+        verify(proximityStates, never()).save(any());
+        verifyNoInteractions(storeEntries);
     }
 
     private StoreEntryDetector detectorFor(Store... stores) {

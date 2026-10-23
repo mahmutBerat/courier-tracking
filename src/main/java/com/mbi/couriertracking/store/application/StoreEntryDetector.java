@@ -2,9 +2,9 @@ package com.mbi.couriertracking.store.application;
 
 import com.mbi.couriertracking.common.geo.DistanceCalculatorStrategy;
 import com.mbi.couriertracking.common.geo.GeoLocation;
+import com.mbi.couriertracking.store.domain.ProximityCheck;
 import com.mbi.couriertracking.store.domain.Store;
 import com.mbi.couriertracking.store.domain.StoreCatalog;
-import com.mbi.couriertracking.store.domain.StoreEntry;
 import com.mbi.couriertracking.store.domain.StoreProximityState;
 import com.mbi.couriertracking.store.persistence.StoreEntryRepository;
 import com.mbi.couriertracking.store.persistence.StoreProximityStateRepository;
@@ -15,13 +15,13 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.Map;
-import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
- * Evaluates one processed courier location against the store catalog, in catalog order, and
- * records the first entry found. Runs inside the caller's courier transaction, which already
+ * Evaluates one processed courier location against every store in the catalog, records each
+ * entry, and keeps the inside/outside state of every pair current, so leaving one store while
+ * entering another is recorded. Runs inside the caller's courier transaction, which already
  * holds the courier row lock, so pair state needs no lock of its own.
  */
 @Service
@@ -45,13 +45,11 @@ public class StoreEntryDetector {
             StoreProximityState state = statesByStoreName.getOrDefault(store.name(),
                     StoreProximityState.initial(courierId, store.name()));
 
-            Optional<StoreEntry> storeEntry = state.checkStoreEntry(distanceMeters, inputTime);
-            if (storeEntry.isPresent()) {
+            ProximityCheck check = state.checkProximity(distanceMeters, inputTime);
+            if (check.changedState()) {
                 proximityStateRepository.save(state);
-                storeEntryRepository.save(storeEntry.get());
-
-                break;
             }
+            check.entry().ifPresent(storeEntryRepository::save);
         }
     }
 

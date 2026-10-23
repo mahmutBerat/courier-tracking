@@ -56,10 +56,10 @@ common/
 The controller calls the concrete `CourierService`. The service loads and locks
 the courier, stores the input, and invokes `Courier.updateDistance`, which owns the
 ordering and accumulation rules. When the report advanced travel state, the service
-hands it to `StoreEntryDetector`, which walks the store catalog and lets
-`StoreProximityState` decide whether a physical entry occurred and whether it
-counts; a report enters at most one store. Domain objects never access
-repositories or HTTP types.
+hands it to `StoreEntryDetector`, which walks the whole store catalog and lets
+each `StoreProximityState` decide whether a physical entry occurred and whether
+it counts, so leaving one store while entering another is recorded as well.
+Domain objects never access repositories or HTTP types.
 
 ### Design patterns
 

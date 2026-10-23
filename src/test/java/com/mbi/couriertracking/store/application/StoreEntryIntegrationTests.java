@@ -42,6 +42,9 @@ class StoreEntryIntegrationTests {
     private static final String ATASEHIR = "Ataşehir MMM Migros";
     private static final double ATASEHIR_LAT = 40.9923307;
     private static final double ATASEHIR_LNG = 29.1244229;
+    private static final String NOVADA = "Novada MMM Migros";
+    private static final double NOVADA_LAT = 40.986106;
+    private static final double NOVADA_LNG = 29.1161293;
     private static final double EARTH_RADIUS_METERS = 6_371_000;
     private static final Instant NOON = Instant.parse("2026-10-21T12:00:00Z");
 
@@ -97,6 +100,20 @@ class StoreEntryIntegrationTests {
         StoreProximityState state = proximityStateRepository.findByCourierIdAndStoreName("courier-1", ATASEHIR).orElseThrow();
         assertTrue(state.isInside());
         assertEquals(NOON.plusSeconds(119), state.getLastPhysicalEntryTime());
+    }
+
+    @Test
+    void movingBetweenStoresRecordsEveryEntryAndMarksTheLeftStoreOutside() throws Exception {
+        // Novada follows Ataşehir in the catalog, so it is only evaluated when Ataşehir is not entered.
+        postLocation("courier-1", NOON, NOVADA_LAT, NOVADA_LNG);                      // enter Novada
+        postLocation("courier-1", NOON.plusSeconds(120), ATASEHIR_LAT, ATASEHIR_LNG); // move to Ataşehir
+        postLocation("courier-1", NOON.plusSeconds(240), NOVADA_LAT, NOVADA_LNG);     // back to Novada
+
+        List<StoreEntry> entries = storeEntryRepository.findByCourierIdOrderByEntryTime("courier-1");
+        assertThat(entries).extracting(StoreEntry::getStoreName).containsExactly(NOVADA, ATASEHIR, NOVADA);
+        assertThat(entries).extracting(StoreEntry::isCounted).containsExactly(true, true, true);
+        assertTrue(proximityStateRepository.findByCourierIdAndStoreName("courier-1", NOVADA).orElseThrow().isInside());
+        assertFalse(proximityStateRepository.findByCourierIdAndStoreName("courier-1", ATASEHIR).orElseThrow().isInside());
     }
 
     @Test
@@ -175,10 +192,14 @@ class StoreEntryIntegrationTests {
 
     private void postMetersNorthOfAtasehir(String courier, Instant time, double metersNorth) throws Exception {
         CourierLocationInput input = atasehirInput(courier, time, metersNorth);
+        postLocation(courier, time, input.lat(), input.lng());
+    }
+
+    private void postLocation(String courier, Instant time, double lat, double lng) throws Exception {
         mvc.perform(post("/api/v1/couriers/locations").contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"time":"%s","courier":"%s","lat":%s,"lng":%s}
-                                """.formatted(input.time(), input.courier(), input.lat(), input.lng())))
+                                """.formatted(time, courier, lat, lng)))
                 .andExpect(status().isNoContent());
     }
 

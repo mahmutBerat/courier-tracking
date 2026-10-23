@@ -5,8 +5,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
-import java.util.Optional;
 
+import static com.mbi.couriertracking.store.domain.ProximityCheck.Transition.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -23,20 +23,20 @@ class StoreProximityStateTests {
     void firstObservationInsideIsACountedEntry() {
         StoreProximityState state = StoreProximityState.initial("courier-1", "Ataşehir MMM Migros");
 
-        Optional<StoreEntry> entry = state.checkStoreEntry(INSIDE, NOON);
+        ProximityCheck entry = state.checkProximity(INSIDE, NOON);
 
         assertTrue(state.isInside());
         assertEquals(NOON, state.getLastPhysicalEntryTime());
         assertEntry(entry, true, NOON);
-        assertEquals("courier-1", entry.orElseThrow().getCourierId());
-        assertEquals("Ataşehir MMM Migros", entry.orElseThrow().getStoreName());
+        assertEquals("courier-1", entry.entry().orElseThrow().getCourierId());
+        assertEquals("Ataşehir MMM Migros", entry.entry().orElseThrow().getStoreName());
     }
 
     @Test
     void firstObservationOutsideIsNotAnEntry() {
         StoreProximityState state = StoreProximityState.initial("courier-1", "store");
 
-        assertTrue(state.checkStoreEntry(OUTSIDE, NOON).isEmpty());
+        assertEquals(UNCHANGED, state.checkProximity(OUTSIDE, NOON).transition());
         assertFalse(state.isInside());
         assertNull(state.getLastPhysicalEntryTime());
     }
@@ -45,7 +45,7 @@ class StoreProximityStateTests {
     void stayingInsideIsNotANewEntryAndKeepsTheEntryTime() {
         StoreProximityState state = enteredAt(NOON);
 
-        assertTrue(state.checkStoreEntry(INSIDE, NOON.plusSeconds(20)).isEmpty());
+        assertEquals(UNCHANGED, state.checkProximity(INSIDE, NOON.plusSeconds(20)).transition());
         assertTrue(state.isInside());
         assertEquals(NOON, state.getLastPhysicalEntryTime());
     }
@@ -55,7 +55,7 @@ class StoreProximityStateTests {
         StoreProximityState state = enteredAt(NOON);
         exit(state, NOON.plusSeconds(10));
 
-        Optional<StoreEntry> reentry = state.checkStoreEntry(INSIDE, NOON.plusSeconds(40));
+        ProximityCheck reentry = state.checkProximity(INSIDE, NOON.plusSeconds(40));
 
         assertEntry(reentry, false, NOON.plusSeconds(40));
         assertEquals(NOON.plusSeconds(40), state.getLastPhysicalEntryTime());
@@ -66,10 +66,10 @@ class StoreProximityStateTests {
         // 12:00:00 counted, 12:00:40 not counted, 12:01:10 is 70 s after the first but 30 s after the last.
         StoreProximityState state = enteredAt(NOON);
         exit(state, NOON.plusSeconds(10));
-        state.checkStoreEntry(INSIDE, NOON.plusSeconds(40));
+        state.checkProximity(INSIDE, NOON.plusSeconds(40));
         exit(state, NOON.plusSeconds(50));
 
-        Optional<StoreEntry> thirdEntry = state.checkStoreEntry(INSIDE, NOON.plusSeconds(70));
+        ProximityCheck thirdEntry = state.checkProximity(INSIDE, NOON.plusSeconds(70));
 
         assertEntry(thirdEntry, false, NOON.plusSeconds(70));
     }
@@ -78,10 +78,10 @@ class StoreProximityStateTests {
     void reentryAfterAnUncountedEntryCountsOnceSixtySecondsHavePassedSinceIt() {
         StoreProximityState state = enteredAt(NOON);
         exit(state, NOON.plusSeconds(10));
-        state.checkStoreEntry(INSIDE, NOON.plusSeconds(40)); // not counted
+        state.checkProximity(INSIDE, NOON.plusSeconds(40)); // not counted
         exit(state, NOON.plusSeconds(50));
 
-        Optional<StoreEntry> reentry = state.checkStoreEntry(INSIDE, NOON.plusSeconds(100)); // 60 s after 12:00:40
+        ProximityCheck reentry = state.checkProximity(INSIDE, NOON.plusSeconds(100)); // 60 s after 12:00:40
 
         assertEntry(reentry, true, NOON.plusSeconds(100));
     }
@@ -92,7 +92,7 @@ class StoreProximityStateTests {
         StoreProximityState state = enteredAt(NOON);
         exit(state, NOON.plusSeconds(10));
 
-        Optional<StoreEntry> reentry = state.checkStoreEntry(INSIDE, NOON.plusSeconds(secondsAfterEntry));
+        ProximityCheck reentry = state.checkProximity(INSIDE, NOON.plusSeconds(secondsAfterEntry));
 
         assertEntry(reentry, true, NOON.plusSeconds(secondsAfterEntry));
     }
@@ -102,7 +102,7 @@ class StoreProximityStateTests {
         StoreProximityState state = enteredAt(NOON);
         exit(state, NOON.plusSeconds(10));
 
-        Optional<StoreEntry> reentry = state.checkStoreEntry(INSIDE, NOON.plusSeconds(59));
+        ProximityCheck reentry = state.checkProximity(INSIDE, NOON.plusSeconds(59));
 
         assertEntry(reentry, false, NOON.plusSeconds(59));
         assertEquals(NOON.plusSeconds(59), state.getLastPhysicalEntryTime());
@@ -113,14 +113,14 @@ class StoreProximityStateTests {
     void distanceUpToAndIncludingOneHundredMetersIsInside(double distanceMeters) {
         StoreProximityState state = StoreProximityState.initial("courier-1", "store");
 
-        assertEntry(state.checkStoreEntry(distanceMeters, NOON), true, NOON);
+        assertEntry(state.checkProximity(distanceMeters, NOON), true, NOON);
     }
 
     @Test
     void exactlyOneHundredMetersWhileInsideRemainsInsideWithoutANewEntry() {
         StoreProximityState state = enteredAt(NOON);
 
-        assertTrue(state.checkStoreEntry(100, NOON.plusSeconds(5)).isEmpty());
+        assertEquals(UNCHANGED, state.checkProximity(100, NOON.plusSeconds(5)).transition());
         assertTrue(state.isInside());
         assertEquals(NOON, state.getLastPhysicalEntryTime());
     }
@@ -129,7 +129,7 @@ class StoreProximityStateTests {
     void justOverOneHundredMetersWhileInsideBecomesOutsideWithoutTouchingTheEntryTime() {
         StoreProximityState state = enteredAt(NOON);
 
-        assertTrue(state.checkStoreEntry(100.001, NOON.plusSeconds(5)).isEmpty());
+        assertEquals(LEFT, state.checkProximity(100.001, NOON.plusSeconds(5)).transition());
         assertFalse(state.isInside());
         assertEquals(NOON, state.getLastPhysicalEntryTime());
     }
@@ -141,23 +141,26 @@ class StoreProximityStateTests {
         StoreProximityState novada = StoreProximityState.initial("courier-1", "Novada MMM Migros");
 
         // Ataşehir's recent entry does not make Novada's first entry an uncounted re-entry.
-        assertEntry(novada.checkStoreEntry(INSIDE, NOON.plusSeconds(20)), true, NOON.plusSeconds(20));
+        assertEntry(novada.checkProximity(INSIDE, NOON.plusSeconds(20)), true, NOON.plusSeconds(20));
     }
 
     private static StoreProximityState enteredAt(Instant time) {
         StoreProximityState state = StoreProximityState.initial("courier-1", "store");
-        state.checkStoreEntry(INSIDE, time);
+        state.checkProximity(INSIDE, time);
         return state;
     }
 
     private static void exit(StoreProximityState state, Instant time) {
-        assertTrue(state.checkStoreEntry(OUTSIDE, time).isEmpty());
+        ProximityCheck check = state.checkProximity(OUTSIDE, time);
+        assertEquals(LEFT, check.transition());
+        assertTrue(check.entry().isEmpty());
         assertFalse(state.isInside());
     }
 
-    private static void assertEntry(Optional<StoreEntry> entry, boolean expectedCounted, Instant expectedTime) {
-        assertTrue(entry.isPresent(), "expected a physical entry");
-        assertEquals(expectedCounted, entry.get().isCounted());
-        assertEquals(expectedTime, entry.get().getEntryTime());
+    private static void assertEntry(ProximityCheck check, boolean expectedCounted, Instant expectedTime) {
+        assertEquals(ENTERED, check.transition());
+        assertTrue(check.entry().isPresent(), "expected a physical entry");
+        assertEquals(expectedCounted, check.entry().get().isCounted());
+        assertEquals(expectedTime, check.entry().get().getEntryTime());
     }
 }

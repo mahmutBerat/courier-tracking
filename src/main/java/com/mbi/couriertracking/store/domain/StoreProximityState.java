@@ -7,7 +7,6 @@ import lombok.NoArgsConstructor;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Optional;
 
 /**
  * Inside/outside state of one courier–store pair and the time of its latest physical entry.
@@ -54,19 +53,22 @@ public class StoreProximityState {
      * Applies one observation. Observations arrive in increasing input time because only strictly
      * newer reports are processed.
      *
-     * @return the physical entry when the courier moved from outside to inside, otherwise empty
+     * @return how the state moved; carries the physical entry when the courier moved from outside
+     * to inside
      */
-    public Optional<StoreEntry> checkStoreEntry(double distanceMeters, Instant time) {
-        boolean insideNow = distanceMeters <= ENTRY_RADIUS_METERS;
-        boolean entered = insideNow && !inside;
-        inside = insideNow;
-        if (!entered) {
-            return Optional.empty();
+    public ProximityCheck checkProximity(double distanceMeters, Instant time) {
+        boolean wasInside = inside;
+        inside = distanceMeters <= ENTRY_RADIUS_METERS;
+        if (inside == wasInside) {
+            return ProximityCheck.unchanged();
+        }
+        if (!inside) {
+            return ProximityCheck.left();
         }
 
         boolean counted = isCountedEntry(time);
         lastPhysicalEntryTime = time;
-        return Optional.of(new StoreEntry(courierId, storeName, time, counted));
+        return ProximityCheck.entered(new StoreEntry(courierId, storeName, time, counted));
     }
 
     /** The first entry always counts; a re-entry counts only after the minimum interval. */
