@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Courier Tracking Demo</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
   body { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 14px; margin: 0; padding: 16px; max-width: 980px; color: #222; background: #fff; }
   h1 { font-size: 20px; margin: 0 0 8px; }
@@ -13,10 +15,16 @@
   input[type=text] { width: 320px; padding: 4px; font: inherit; }
   textarea { width: 100%; box-sizing: border-box; padding: 4px; font: inherit; }
   button { font: inherit; padding: 4px 10px; cursor: pointer; }
+  .tabs { margin: 12px 0; border-bottom: 2px solid #ccc; }
+  .tabs button { border: 1px solid #ccc; border-bottom: none; background: #f3f3f3; margin-right: 4px; padding: 6px 14px; }
+  .tabs button.active { background: #fff; font-weight: bold; }
+  .panel { display: none; }
+  .panel.active { display: block; }
   .step { border: 1px solid #ccc; padding: 10px; margin: 10px 0; }
   .step .desc { color: #555; }
   .meta { color: #666; }
   pre { background: #f6f6f6; padding: 8px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; min-height: 1.2em; }
+  pre.cmd { background: #eef3ff; }
   .ok { border-left: 6px solid #2a8f2a; }
   .bad { border-left: 6px solid #c33; }
   .toolbar { margin: 8px 0; }
@@ -24,14 +32,25 @@
   small { color: #666; }
   table { border-collapse: collapse; }
   td, th { border: 1px solid #ddd; padding: 3px 8px; text-align: left; }
+  #map { height: 380px; border: 1px solid #ccc; margin: 8px 0; }
+  .picked { color: #333; }
 </style>
 </head>
 <body>
 <h1>Courier Tracking API demo</h1>
-<p>Plain page mirroring <code>docs/api-examples.md</code>. Start the application with <code>make run</code>, then open
-<code>http://localhost:8080/demo.html</code>. Success cases only; each step shows the expected status and a green bar means the response matched it.</p>
+<p>Plain page mirroring <code>docs/api-examples.md</code>, success cases only. Start the application with
+<code>make run</code> (or <code>make run-kafka</code> for the Kafka panel) and open <code>http://localhost:8080/demo.html</code>.
+Each step shows its expected status; a green bar means the response matched it.</p>
 
 <p><label for="baseUrl">Base URL</label> <input type="text" id="baseUrl"></p>
+
+<div class="tabs">
+  <button type="button" id="tab-http" class="active" onclick="showPanel('http')">HTTP requests</button>
+  <button type="button" id="tab-kafka" onclick="showPanel('kafka')">Kafka messages</button>
+</div>
+
+<!-- ===================== HTTP panel ===================== -->
+<div id="panel-http" class="panel active">
 <p><label for="courierId">Courier ID</label> <input type="text" id="courierId">
   <button type="button" onclick="newCourierId()">New ID</button>
   <small>A fresh ID keeps each walkthrough independent; reusing an ID never resets its distance.</small></p>
@@ -45,23 +64,96 @@
 
 <h2>Custom location</h2>
 <div class="step" id="custom">
-  <p class="desc">Build your own scenario. Store buttons fill the coordinates of the supplied stores; a report within 100 m of a store is an entry.</p>
+  <p class="desc">Build your own scenario. Click the map to pick lat/lng (drag the marker to adjust). Store buttons fill the exact
+  store coordinates and center the map there; the circles are the 100 m entry areas. Locations sent from this form are drawn as a path.</p>
+  <div id="map"></div>
+  <p class="picked" id="pickedInfo">Click the map to pick a point.</p>
   <p><label for="cTime">time</label> <input type="text" id="cTime" value="2026-10-21T12:02:00Z"></p>
   <p><label for="cLat">lat</label> <input type="text" id="cLat" value="40.9923307"></p>
   <p><label for="cLng">lng</label> <input type="text" id="cLng" value="29.1244229"></p>
   <p>
-    <button type="button" onclick="fillStore(40.9923307, 29.1244229)">Ataşehir</button>
-    <button type="button" onclick="fillStore(40.986106, 29.1161293)">Novada</button>
-    <button type="button" onclick="fillStore(41.0066851, 28.6552262)">Beylikdüzü</button>
-    <button type="button" onclick="fillStore(41.055783, 29.0210292)">Ortaköy</button>
-    <button type="button" onclick="fillStore(40.9632463, 29.0630908)">Caddebostan</button>
-    <button type="button" onclick="addSeconds(30)">time +30 s</button>
-    <button type="button" onclick="addSeconds(60)">time +60 s</button>
+    <button type="button" onclick="pick(40.9923307, 29.1244229, true)">Ataşehir</button>
+    <button type="button" onclick="pick(40.986106, 29.1161293, true)">Novada</button>
+    <button type="button" onclick="pick(41.0066851, 28.6552262, true)">Beylikdüzü</button>
+    <button type="button" onclick="pick(41.055783, 29.0210292, true)">Ortaköy</button>
+    <button type="button" onclick="pick(40.9632463, 29.0630908, true)">Caddebostan</button>
+    <button type="button" onclick="addSeconds('cTime', 30)">time +30 s</button>
+    <button type="button" onclick="addSeconds('cTime', 60)">time +60 s</button>
   </p>
   <p><button type="button" onclick="sendCustom()">Send location</button>
      <button type="button" onclick="runStep('distance')">Query distance</button>
      <span class="meta">Expected: 204</span></p>
   <pre id="out-custom"></pre>
+</div>
+</div>
+
+<!-- ===================== Kafka panel ===================== -->
+<div id="panel-kafka" class="panel">
+<p class="desc">The browser cannot produce Kafka records. Produce from a terminal with the commands below (copy buttons),
+then verify consumption through the HTTP API from this page. Requires <code>make run-kafka</code>: PostgreSQL, the
+Compose broker, and the application with the <code>local,kafka</code> profiles.</p>
+<p><label for="kafkaCourierId">Courier ID</label> <input type="text" id="kafkaCourierId" value="kafka-courier-1">
+  <small>Fixed sample courier used by <code>scripts/kafka/sample-locations.jsonl</code>.</small></p>
+
+<div class="step" id="step-kRegister">
+  <p><strong>K1. Register the sample courier</strong> <span class="meta">POST /api/v1/couriers · expected 201 (409 if already registered)</span></p>
+  <p class="desc">Kafka carries no registration message, so the courier must exist before messages are consumed. <code>make kafka-send</code> does this step itself.</p>
+  <p><button type="button" onclick="runKafkaRegister()">Send</button></p>
+  <pre id="out-kRegister"></pre>
+</div>
+
+<div class="step" id="step-kSend">
+  <p><strong>K2. Produce the sample messages</strong> <span class="meta">terminal</span></p>
+  <p class="desc">Registers <code>kafka-courier-1</code> and produces three <code>key|json</code> lines: Ataşehir at 12:00:00, Novada at 12:01:00, Ataşehir again at 12:01:30. Same scenario as HTTP steps 4, 5 and 5b.</p>
+  <pre class="cmd" id="cmd-kSend">make kafka-send</pre>
+  <p><button type="button" onclick="copyText('cmd-kSend')">Copy command</button></p>
+  <pre>kafka-courier-1|{"time":"2026-10-21T12:00:00Z","courier":"kafka-courier-1","lat":40.9923307,"lng":29.1244229}
+kafka-courier-1|{"time":"2026-10-21T12:01:00Z","courier":"kafka-courier-1","lat":40.986106,"lng":29.1161293}
+kafka-courier-1|{"time":"2026-10-21T12:01:30Z","courier":"kafka-courier-1","lat":40.9923307,"lng":29.1244229}</pre>
+</div>
+
+<div class="step" id="step-kDistance">
+  <p><strong>K3. Verify consumption</strong> <span class="meta">GET /api/v1/couriers/distance · expected 200</span></p>
+  <p class="desc">On a fresh database the total after K2 is 1963.3136870424555 m and <code>store_entries</code> holds three counted rows.
+  A second <code>make kafka-send</code> is a duplicate no-op: the total does not change and no record is skipped.</p>
+  <p><button type="button" onclick="runKafkaDistance()">Query distance</button>
+     <button type="button" onclick="runKafkaList()">List couriers</button></p>
+  <pre id="out-kDistance"></pre>
+</div>
+
+<div class="step" id="step-kInvalid">
+  <p><strong>K4. Produce invalid messages and watch them being skipped</strong> <span class="meta">terminal</span></p>
+  <p class="desc">Three records that cannot succeed on retry: malformed JSON, latitude 95, and an unregistered courier.
+  The application skips each one without retrying and logs a single INFO line
+  (<code>Skipped unprocessable location message topic=… partition=… offset=… key=… exception=…</code>) in the
+  <code>make run-kafka</code> terminal; no rows are written. Afterwards K3 shows an unchanged total.
+  Publishing skipped records to a dead-letter topic is the planned next step.</p>
+  <pre class="cmd" id="cmd-kInvalid">make kafka-send-invalid</pre>
+  <p><button type="button" onclick="copyText('cmd-kInvalid')">Copy command</button></p>
+</div>
+
+<div class="step" id="step-kCustom">
+  <p><strong>K5. Compose a custom message</strong> <span class="meta">terminal</span></p>
+  <p class="desc">Builds a <code>key|json</code> line for the courier above and a one-line command that produces it through the broker container. Then use K3 to verify.</p>
+  <p><label for="kTime">time</label> <input type="text" id="kTime" value="2026-10-21T12:03:00Z"></p>
+  <p><label for="kLat">lat</label> <input type="text" id="kLat" value="40.986106"></p>
+  <p><label for="kLng">lng</label> <input type="text" id="kLng" value="29.1161293"></p>
+  <p>
+    <button type="button" onclick="fillStore('kLat', 'kLng', 40.9923307, 29.1244229); renderKafkaMessage()">Ataşehir</button>
+    <button type="button" onclick="fillStore('kLat', 'kLng', 40.986106, 29.1161293); renderKafkaMessage()">Novada</button>
+    <button type="button" onclick="fillStore('kLat', 'kLng', 41.0066851, 28.6552262); renderKafkaMessage()">Beylikdüzü</button>
+    <button type="button" onclick="fillStore('kLat', 'kLng', 41.055783, 29.0210292); renderKafkaMessage()">Ortaköy</button>
+    <button type="button" onclick="fillStore('kLat', 'kLng', 40.9632463, 29.0630908); renderKafkaMessage()">Caddebostan</button>
+    <button type="button" onclick="addSeconds('kTime', 30); renderKafkaMessage()">time +30 s</button>
+    <button type="button" onclick="addSeconds('kTime', 60); renderKafkaMessage()">time +60 s</button>
+    <button type="button" onclick="usePickedForKafka()">Use picked map point</button>
+    <button type="button" onclick="renderKafkaMessage()">Refresh</button>
+  </p>
+  <pre id="kMessage"></pre>
+  <p><button type="button" onclick="copyText('kMessage')">Copy message line</button></p>
+  <pre class="cmd" id="kCommand"></pre>
+  <p><button type="button" onclick="copyText('kCommand')">Copy produce command</button></p>
+</div>
 </div>
 
 <h2>Reference</h2>
@@ -80,7 +172,7 @@
 <pre id="log"></pre>
 
 <script>
-// Placeholders: {{courierId}} is replaced from the input at send time.
+// Placeholders: {{courierId}} is replaced from the HTTP panel's input at send time.
 const STEPS = [
   { id: 'health', title: '1. Health', method: 'GET', path: '/actuator/health', expect: 200,
     desc: 'JSON containing "status":"UP" when healthy.' },
@@ -102,10 +194,92 @@ const STEPS = [
     desc: 'Accumulated distance in meters from persisted courier state.' },
 ];
 
-
-const ALL = STEPS;
+const STORES = [
+  { name: 'Ataşehir MMM Migros', lat: 40.9923307, lng: 29.1244229 },
+  { name: 'Novada MMM Migros', lat: 40.986106, lng: 29.1161293 },
+  { name: 'Beylikdüzü 5M Migros', lat: 41.0066851, lng: 28.6552262 },
+  { name: 'Ortaköy MMM Migros', lat: 41.055783, lng: 29.0210292 },
+  { name: 'Caddebostan MMM Migros', lat: 40.9632463, lng: 29.0630908 },
+];
+const ENTRY_RADIUS_METERS = 100;
 
 function byId(id) { return document.getElementById(id); }
+
+// Same Haversine as the server: sphere, R = 6,371,000 m.
+function haversineMeters(lat1, lng1, lat2, lng2) {
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(Math.min(1, a)), Math.sqrt(Math.max(0, 1 - a)));
+}
+
+let map, pickedMarker, pathLine;
+const pathPoints = [];
+
+function initMap() {
+  if (typeof L === 'undefined') {
+    byId('map').textContent = 'Map library not loaded (offline?). Type coordinates manually.';
+    byId('map').style.padding = '8px';
+    return;
+  }
+  map = L.map('map').setView([40.989, 29.12], 15);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; OpenStreetMap contributors',
+  }).addTo(map);
+  for (const s of STORES) {
+    L.circle([s.lat, s.lng], { radius: ENTRY_RADIUS_METERS, color: '#c33', weight: 1, fillOpacity: 0.15 }).addTo(map);
+    L.circleMarker([s.lat, s.lng], { radius: 4, color: '#c33', fillOpacity: 1 }).addTo(map).bindTooltip(s.name);
+  }
+  pathLine = L.polyline([], { color: '#1a5fb4', weight: 3 }).addTo(map);
+  map.on('click', e => pick(e.latlng.lat, e.latlng.lng, false));
+}
+
+// Fill the custom form from a point; center the map when asked (store buttons).
+function pick(lat, lng, center) {
+  const rLat = Number(lat.toFixed(7)), rLng = Number(lng.toFixed(7));
+  byId('cLat').value = rLat;
+  byId('cLng').value = rLng;
+  if (map) {
+    if (!pickedMarker) {
+      pickedMarker = L.marker([rLat, rLng], { draggable: true }).addTo(map);
+      pickedMarker.on('dragend', () => { const p = pickedMarker.getLatLng(); pick(p.lat, p.lng, false); });
+    } else {
+      pickedMarker.setLatLng([rLat, rLng]);
+    }
+    if (center) { map.setView([rLat, rLng], 17); }
+  }
+  describePicked(rLat, rLng);
+}
+
+function describePicked(lat, lng) {
+  let nearest = null;
+  for (const s of STORES) {
+    const d = haversineMeters(lat, lng, s.lat, s.lng);
+    if (!nearest || d < nearest.d) { nearest = { name: s.name, d }; }
+  }
+  const inside = nearest.d <= ENTRY_RADIUS_METERS;
+  byId('pickedInfo').textContent = 'Picked ' + lat + ', ' + lng + ' · nearest store: ' + nearest.name + ' at '
+    + nearest.d.toFixed(1) + ' m · ' + (inside ? 'INSIDE the 100 m area (entry if coming from outside)' : 'outside');
+}
+
+function addPathPoint(lat, lng) {
+  pathPoints.push([lat, lng]);
+  if (pathLine) { pathLine.setLatLngs(pathPoints); }
+}
+
+function usePickedForKafka() {
+  byId('kLat').value = byId('cLat').value;
+  byId('kLng').value = byId('cLng').value;
+  renderKafkaMessage();
+}
+
+function showPanel(name) {
+  for (const p of ['http', 'kafka']) {
+    byId('panel-' + p).classList.toggle('active', p === name);
+    byId('tab-' + p).classList.toggle('active', p === name);
+  }
+  if (name === 'http' && map) { setTimeout(() => map.invalidateSize(), 0); }
+}
 
 function newCourierId() {
   byId('courierId').value = 'demo-' + new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + Math.floor(Math.random() * 1000);
@@ -131,12 +305,12 @@ function substitute(text) {
   return text.replaceAll('{{courierId}}', byId('courierId').value.trim());
 }
 
-async function send(step, bodyText) {
+async function send(method, path, bodyText, contentType) {
   const base = byId('baseUrl').value.trim().replace(/\/$/, '');
-  const url = base + substitute(step.path);
-  const init = { method: step.method, headers: {} };
+  const url = base + path;
+  const init = { method, headers: {} };
   if (bodyText !== undefined) {
-    init.headers['Content-Type'] = step.contentType || 'application/json';
+    init.headers['Content-Type'] = contentType || 'application/json';
     init.body = bodyText;
   }
   const started = performance.now();
@@ -153,17 +327,17 @@ async function send(step, bodyText) {
   let pretty = text;
   try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
   const line = 'HTTP ' + status + ' (' + ms + ' ms)' + (pretty ? '\n' + pretty : '\n<empty body>');
-  logLine(step.method + ' ' + url + (bodyText !== undefined ? '\n  ' + bodyText : '') + '\n  -> ' + status);
+  logLine(method + ' ' + url + (bodyText !== undefined ? '\n  ' + bodyText : '') + '\n  -> ' + status);
   return { status, line };
 }
 
 async function runStep(id) {
-  const step = ALL.find(s => s.id === id);
+  const step = STEPS.find(s => s.id === id);
   const bodyEl = byId('body-' + id);
   const bodyText = bodyEl ? substitute(bodyEl.value) : undefined;
   const out = byId('out-' + id);
   out.textContent = 'sending…';
-  const { status, line } = await send(step, bodyText);
+  const { status, line } = await send(step.method, substitute(step.path), bodyText);
   out.textContent = line;
   mark(byId('step-' + id), status === step.expect);
 }
@@ -184,20 +358,76 @@ async function sendCustom() {
     lat: Number(byId('cLat').value),
     lng: Number(byId('cLng').value),
   });
-  const step = { method: 'POST', path: '/api/v1/couriers/locations', expect: 204 };
   const out = byId('out-custom');
   out.textContent = 'sending…';
-  const { status, line } = await send(step, body);
+  const { status, line } = await send('POST', '/api/v1/couriers/locations', body);
   out.textContent = line;
-  mark(byId('custom'), status === step.expect);
+  mark(byId('custom'), status === 204);
+  if (status === 204) { addPathPoint(Number(byId('cLat').value), Number(byId('cLng').value)); }
 }
 
-function fillStore(lat, lng) { byId('cLat').value = lat; byId('cLng').value = lng; }
+// Kafka panel: HTTP verification steps.
+function kafkaCourier() { return byId('kafkaCourierId').value.trim(); }
 
-function addSeconds(seconds) {
-  const t = new Date(byId('cTime').value.trim());
+async function runKafkaRegister() {
+  const out = byId('out-kRegister');
+  out.textContent = 'sending…';
+  const { status, line } = await send('POST', '/api/v1/couriers', JSON.stringify({ courierId: kafkaCourier() }));
+  out.textContent = line + (status === 409 ? '\n(already registered: fine, state is preserved)' : '');
+  mark(byId('step-kRegister'), status === 201 || status === 409);
+}
+
+async function runKafkaDistance() {
+  const out = byId('out-kDistance');
+  out.textContent = 'sending…';
+  const { status, line } = await send('GET', '/api/v1/couriers/distance?courierId=' + encodeURIComponent(kafkaCourier()));
+  out.textContent = line;
+  mark(byId('step-kDistance'), status === 200);
+}
+
+async function runKafkaList() {
+  const out = byId('out-kDistance');
+  out.textContent = 'sending…';
+  const { status, line } = await send('GET', '/api/v1/couriers');
+  out.textContent = line;
+  mark(byId('step-kDistance'), status === 200);
+}
+
+function renderKafkaMessage() {
+  const courier = kafkaCourier();
+  const json = JSON.stringify({
+    time: byId('kTime').value.trim(),
+    courier,
+    lat: Number(byId('kLat').value),
+    lng: Number(byId('kLng').value),
+  });
+  const message = courier + '|' + json;
+  byId('kMessage').textContent = message;
+  byId('kCommand').textContent =
+    "printf '%s\\n' '" + message.replaceAll("'", "'\\''") + "' > /tmp/custom-location.jsonl && scripts/kafka/produce-locations.sh /tmp/custom-location.jsonl";
+}
+
+async function copyText(id) {
+  const text = byId(id).textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    logLine('copied: ' + text);
+  } catch (_) {
+    const range = document.createRange();
+    range.selectNodeContents(byId(id));
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    logLine('clipboard unavailable; text selected for manual copy');
+  }
+}
+
+function fillStore(latId, lngId, lat, lng) { byId(latId).value = lat; byId(lngId).value = lng; }
+
+function addSeconds(timeId, seconds) {
+  const t = new Date(byId(timeId).value.trim());
   if (isNaN(t)) { return; }
-  byId('cTime').value = new Date(t.getTime() + seconds * 1000).toISOString().replace('.000Z', 'Z');
+  byId(timeId).value = new Date(t.getTime() + seconds * 1000).toISOString().replace('.000Z', 'Z');
 }
 
 function logLine(text) {
@@ -206,7 +436,7 @@ function logLine(text) {
 }
 
 function clearOutputs() {
-  for (const s of ALL) { byId('out-' + s.id).textContent = ''; byId('step-' + s.id).classList.remove('ok', 'bad'); }
+  for (const s of STEPS) { byId('out-' + s.id).textContent = ''; byId('step-' + s.id).classList.remove('ok', 'bad'); }
   byId('out-custom').textContent = '';
   byId('custom').classList.remove('ok', 'bad');
   byId('log').textContent = '';
@@ -215,6 +445,15 @@ function clearOutputs() {
 byId('baseUrl').value = location.protocol.startsWith('http') ? location.origin : 'http://localhost:8080';
 newCourierId();
 render(STEPS, byId('steps'));
+initMap();
+for (const id of ['cLat', 'cLng']) {
+  byId(id).addEventListener('change', () => {
+    const lat = Number(byId('cLat').value), lng = Number(byId('cLng').value);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) { pick(lat, lng, true); }
+  });
+}
+for (const id of ['kafkaCourierId', 'kTime', 'kLat', 'kLng']) { byId(id).addEventListener('input', renderKafkaMessage); }
+renderKafkaMessage();
 </script>
 </body>
 </html>

@@ -37,3 +37,6 @@ out/
 
 ### VS Code ###
 .vscode/
+
+# Local plan-execution scratch (superpowers skills)
+.superpowers/

@@ -31,6 +31,10 @@ query, and store-entry detection with the one-minute rule. See
   with its counted flag in `store_entries`.
 - Validate coordinates and required fields; report every error with one uniform
   `ErrorResponse` body (status, error, code, message, path, optional field errors).
+- Consume the same location reports from the Kafka topic `courier-locations` when the
+  optional `kafka` profile is active: at-least-once delivery, per-courier ordering by
+  key, retries for transient failures, and unprocessable messages skipped with one
+  INFO log line (a dead-letter topic is planned).
 - Manage schema with Liquibase; verify persistence against real PostgreSQL with Testcontainers.
 - Swagger UI, OpenAPI JSON/YAML, and an ordered curl walkthrough.
 
@@ -44,6 +48,7 @@ courier/
   application/   CourierService: use-case orchestration and transaction boundary
   domain/        Courier aggregate: travel ordering and accumulation rules
   persistence/   Input history record, Spring Data repositories, persistence mapper
+  messaging/     Kafka inbound adapter: message record, mapper, listener, Kafka configuration (kafka profile)
 store/
   application/   StoreEntryDetector, catalog loading from stores.json
   domain/        Store, StoreCatalog, StoreProximityState (entry rules), StoreEntry
@@ -68,6 +73,7 @@ Domain objects never access repositories or HTTP types.
 |------------|------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
 | Strategy   | `DistanceCalculatorStrategy` / `HaversineDistanceCalculatorStrategy`                     | Keeps the geographic formula replaceable and the domain independent of it; one strategy serves both travel segments and store proximity     |
 | Repository | `CourierRepository`, `CourierLocationRepository`, `StoreProximityStateRepository`, `StoreEntryRepository` (Spring Data JPA) | Encapsulates persistence behind interfaces used only by application services; domain objects never touch them                               |
+| Adapter    | `courier.messaging.CourierLocationKafkaListener` with `CourierLocationMessageMapper` (optional `kafka` profile) | Adapts Kafka records to the `submitLocation` use case: parse, map, validate, delegate. The service and domain never see the transport; HTTP and Kafka share one validation and one transaction path |
 
 ## API overview
 
@@ -82,6 +88,8 @@ Domain objects never access repositories or HTTP types.
 POST location body: `{"time":"2026-10-21T12:00:00Z","courier":"courier-1","lat":40.9923307,"lng":29.1244229}`.
 `time` is a UTC instant (explicit offsets are normalized); latitude must be within
 [-90, 90] and longitude within [-180, 180]. See [Swagger and curl examples](docs/api-examples.md).
+With the `kafka` profile the same JSON arrives as a message on `courier-locations`
+(key = courier ID); see [Kafka messages](docs/api-examples.md#kafka-messages).
 
 ## Processing rules in brief
 
@@ -293,6 +301,39 @@ detailed behavior, acceptance criteria, and verification evidence.
   tracing headers, and a Postman collection are left out to keep the delivery
   focused; coverage is reported, not enforced as a threshold.
 
+### ADR-013: Optional Kafka ingress through an inbound Adapter
+
+- **Context:** The case describes the input as streaming geolocations. The owner
+  wants a realistic streaming entry point next to the REST endpoint, a stronger
+  second design pattern than Repository, and hands-on Kafka experience, while the
+  reviewer must still be able to run the application without a broker.
+- **Decision:** A `courier.messaging` package holds an inbound Adapter: a
+  `CourierLocationMessage` record, a MapStruct mapper to `CourierLocationInput`, and
+  a `@KafkaListener` that parses the JSON value with the application's Jackson
+  mapper, validates the mapped input with the shared constraints, and calls the
+  concrete `CourierService.submitLocation`. Messages that can never succeed
+  (unparseable JSON, empty payload, constraint violations, unknown courier) are
+  skipped at once; other failures get three attempts in total (two retries, one
+  second apart), then are skipped. A skipped record is logged once at INFO with topic, partition, offset,
+  key, and exception class; publishing it to a dead-letter topic was implemented
+  and then removed by the owner on 2026-10-23 to keep this increment small
+  (S010-D14), and remains the planned next step. Delivery is at-least-once; redelivered records
+  are absorbed by the duplicate suppression of ADR-004. Everything Kafka-specific is
+  created only when `courier.kafka.enabled=true`, which the `kafka` Spring profile
+  sets; Compose starts a single-node KRaft broker under the `kafka` profile and Make
+  targets produce sample messages with the console producer. Spec:
+  [S010](docs/specs/010-kafka-location-ingress.md).
+- **Alternatives:** Kafka as the only input with REST removed; a service interface
+  ("port") with HTTP and Kafka implementations; Avro with a Schema Registry; Spring
+  Cloud Stream; Kafka transactions for exactly-once; a dead-letter topic now instead
+  of later.
+- **Trade-offs:** Two inputs must stay consistent, mitigated by one validation and
+  one service path. The Kafka integration test starts a second Testcontainer and
+  lengthens the suite. At-least-once means duplicates reach the database and are
+  rejected there. With the profile active and the broker unreachable, startup is
+  delayed by the admin client's topic-creation attempts (about 40 s observed) but
+  succeeds, and the consumer joins when the broker appears.
+
 ## Technology stack
 
 | Area                      | Technology                                                             |
@@ -304,7 +345,8 @@ detailed behavior, acceptance criteria, and verification evidence.
 | Mapping and boilerplate   | MapStruct 1.6.3, Lombok                                                |
 | API documentation         | springdoc-openapi 3.1.1                                                |
 | Health                    | Spring Boot Actuator                                                   |
-| Testing                   | JUnit 5, Mockito, AssertJ, Spring Boot Test, PostgreSQL Testcontainers |
+| Messaging                 | Spring for Apache Kafka 4.1.1, optional `kafka` profile, Apache Kafka 4.3 broker in Compose |
+| Testing                   | JUnit 5, Mockito, AssertJ, Awaitility, Spring Boot Test, PostgreSQL and Kafka Testcontainers |
 | Coverage and CI           | JaCoCo, GitHub Actions                                                 |
 | Build and local execution | Gradle Wrapper, GNU Make, Docker Compose, multi-stage Dockerfile       |
 
@@ -319,7 +361,7 @@ make run
 This starts PostgreSQL, waits for its health check, and runs the application on
 `http://localhost:8080`. Then open [Swagger UI](http://localhost:8080/swagger-ui/index.html)
 or follow the [curl walkthrough](docs/api-examples.md). For manual testing only,
-[demo.html](http://localhost:8080/demo.html) runs the success-path walkthrough from the browser. Stop with `Ctrl+C` and
+[demo.html](http://localhost:8080/demo.html) runs the success-path walkthrough from the browser, with a second tab for the Kafka sample commands and their HTTP verification. Stop with `Ctrl+C` and
 `make down`. All commands, environment variables, IDE setup, and troubleshooting
 are in the [development guide](docs/development-guide.md).
 
@@ -332,6 +374,18 @@ make stack-up
 This builds the application image from the Dockerfile and starts PostgreSQL and
 the application on `http://localhost:8080`. Follow logs with `make stack-logs`
 and stop with `make down`.
+
+With Kafka (optional, see ADR-013):
+
+```sh
+make run-kafka          # PostgreSQL + single-node Kafka broker + application with the local,kafka profiles
+make kafka-send         # register kafka-courier-1 and produce the sample location messages
+make kafka-send-invalid # three unprocessable messages: skipped and logged at INFO
+```
+
+`make stack-up-kafka` runs the same with the application in a container. Details and
+the message contract are in the [development guide](docs/development-guide.md#kafka-profile)
+and [API examples](docs/api-examples.md#kafka-messages).
 
 ## Testing
 
@@ -382,11 +436,15 @@ requests.
 | [API examples](docs/api-examples.md)                 | Swagger and ordered curl requests with expected responses     |
 | [Development guide](docs/development-guide.md)       | Commands, configuration, migrations, troubleshooting          |
 | [Implementation guide](docs/implementation-guide.md) | Conventions for Lombok, MapStruct, packages, geography        |
+| [Plans](docs/plans)                                  | Implementation plans executed against the specifications      |
 
 ## Remaining work
 
 - Delivery polish (milestone M7): end-to-end walkthrough against a fresh database,
   clean build, final documentation review.
-- Optional: a plain HTML test page (M8), subject to owner decision.
+- Delivered beyond the case: the HTML test page (M8, `static/demo.html`) and the
+  optional Kafka ingress (M9, ADR-013).
+- Kafka follow-up: publish skipped messages to a dead-letter topic (S010-D14).
 - Not planned for this delivery: SpotBugs static analysis, trace correlation
-  headers, OTLP export, and a Postman collection.
+  headers, OTLP export, a Postman collection, and Avro or a Schema Registry for
+  the Kafka payload.
