@@ -13,8 +13,9 @@ behavior is backed by unit and integration tests.
 
 **Status:** all case-study behavior is implemented: courier registration/listing,
 location submission with duplicate suppression, travel-distance accumulation and
-query, and store-entry detection with the one-minute rule. See
-[Remaining work](#remaining-work) for delivery polish.
+query, and store-entry detection with the one-minute rule. Delivery acceptance (M7)
+was closed on 2026-10-26; see [Remaining work](#remaining-work) for what is
+intentionally left out.
 
 ## Quick start
 
@@ -319,8 +320,9 @@ Coverage:
 
 - Domain and geography unit tests: travel ordering and accumulation, invalid
   results, coordinate validation, Haversine known distances and edge cases, and
-  every store-entry rule (inclusive 100 m boundary, 59/60/61 s re-entries,
-  interval measured from uncounted entries, pair independence).
+  every store-entry rule (inclusive 100 m boundary, 59/60/61 s re-entries, the
+  interval measured from the visit's entry rather than its exit, store switches in
+  one report, pair independence).
 - Catalog tests: the real `stores.json` loads the five stores with exact
   coordinates; empty or invalid definitions fail startup.
 - Service tests with Mockito: orchestration, failure propagation, and that only
@@ -331,9 +333,10 @@ Coverage:
   identical requests), millisecond truncation and migration SQL, rollback with retry,
   same-courier lock waits observed through `pg_stat_activity`, independent courier
   progress, concurrent first reports, registration races, OpenAPI document contents,
-  store entries through HTTP (counted/uncounted chain, stale and duplicate reports,
-  rollback of the whole transaction, courier independence, eight concurrent
-  reports inside a store yielding exactly one entry).
+  store visits through HTTP (open, close, and resume within one minute, store
+  switch, stale and duplicate reports, rollback of the whole transaction, courier
+  independence, eight concurrent reports inside a store yielding exactly one
+  visit, one open visit per pair enforced by the database).
 
 ## Continuous integration
 
@@ -360,8 +363,9 @@ requests.
 
 ## Remaining work
 
-- Delivery polish (milestone M7): end-to-end walkthrough against a fresh database,
-  clean build, final documentation review.
+- Nothing remains for the case delivery: M7 was closed on 2026-10-26 after a clean
+  build with 187 passing tests, a green CI run, the owner's manual end-to-end
+  walkthrough, and the final documentation review.
 - Delivered beyond the case: the HTML test page (M8, `static/demo.html`) and the
   optional Kafka ingress (M9, ADR-013).
 - Kafka follow-up: publish skipped messages to a dead-letter topic (S010-D14).
