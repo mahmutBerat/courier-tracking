@@ -319,8 +319,6 @@ requests.
 | Document                                             | Purpose                                                       |
 |------------------------------------------------------|---------------------------------------------------------------|
 | [Documentation index](docs/README.md)                | Working cycle, milestone review, specification conventions    |
-| [Initial decisions](docs/initial-decisions.md)       | Case requirements, interpretation, shared domain language     |
-| [Roadmap](docs/roadmap.md)                           | Milestones, progress, remaining work                          |
 | [Architectural decisions](docs/architecture-decisions.md) | All fifteen ADRs, including superseded ones              |
 | [Specifications](docs/specs)                         | Behavior, acceptance criteria, and verification per increment |
 | [API examples](docs/api-examples.md)                 | Swagger and ordered curl requests with expected responses     |
