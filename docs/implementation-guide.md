@@ -17,18 +17,21 @@ their original spelling.
    and accumulation rules and returns whether the report advanced travel state;
    JPA flushes the aggregate at commit.
 4. For an advancing report, `StoreEntryDetector.detectEntries(courierId, location, time)`
-   loads the courier's pair states with one query, then walks the catalog in
-   order: it computes the distance to the store, takes the pair's
-   `StoreProximityState` from that result (or `initial`), and calls
-   `checkProximity(distance, time)`. The returned `ProximityCheck` says whether the
-   pair entered, left, or stayed; a changed pair state is saved and an entry is
-   saved when one occurred. The walk covers the whole catalog so that leaving one
-   store while entering another is recorded. The detector runs with
-   `Propagation.MANDATORY`: it can only execute inside the courier transaction.
+   loads the courier's latest visit per store with one query into
+   `CourierStoreVisits` and checks every store in the catalog against it. That
+   domain object opens a `StoreVisit` on each physical entry (the visit decides
+   whether it counts) and closes the open visit of every store the courier left, so
+   leaving one store while entering another is recorded as well; the detector saves
+   what changed. The detector runs with `Propagation.MANDATORY`: it can only execute
+   inside the courier transaction.
+5. The `StoreVisitResult` outcome names the visit opened and the store the courier
+   is now inside; the service writes that summary on the locked `Courier`
+   (`recordStoreEntry`, `updateCurrentStore`).
 
-A database failure rolls back the input row, the courier update, pair state, and
-entries together. Unknown couriers are rejected before any write. Duplicates also
-acquire the courier lock.
+A database failure rolls back the input row, the courier update, and the visits
+together. Unknown couriers are rejected before any write. Duplicates also acquire
+the courier lock. Queries receive `CourierSummary` records; entities never reach the
+controller. Domain objects never access repositories or HTTP types.
 
 `GET /api/v1/couriers/distance` reads the courier row with `findById` in a
 read-only transaction and maps its summary columns to `lastStoreName`,

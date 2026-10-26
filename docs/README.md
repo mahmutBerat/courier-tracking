@@ -10,12 +10,38 @@ registration and listing, location persistence with duplicate suppression, atomi
 travel-distance accumulation, the distance query, and store-entry detection with
 the one-minute rule, persisted as store visits with entry and exit times and a
 store summary on the courier row (S011). The same reports can be consumed from
-Kafka when the optional `kafka` profile is active (S010). All architectural
+Kafka when the optional ingress is enabled (`courier.kafka.enabled=true`, set by the
+`local` profile; S010). Delivery acceptance (M7) was closed on 2026-10-26; the HTML
+test page (M8) and the Kafka ingress (M9) were delivered beyond the case. All architectural
 decisions are recorded in [Architectural decisions](architecture-decisions.md);
 the [root README](../README.md#architectural-decisions) repeats the five that
 shape the system most.
 
 For manual testing, start with [Swagger and curl examples](api-examples.md).
+
+### Key capabilities
+
+- Register couriers explicitly and list registered courier IDs.
+- Persist every distinct location report for traceability.
+- Suppress exact duplicates with a database unique constraint and native
+  `INSERT ... ON CONFLICT DO NOTHING`.
+- Accumulate Haversine distance in meters from each courier's last processed location.
+- Keep delayed and same-time reports without letting them change travel state.
+- Commit input storage and courier state in one transaction, serialized per courier
+  with `SELECT FOR UPDATE`.
+- Detect when a courier enters the 100 m area of any of the five supplied stores,
+  apply the one-minute re-entry rule per courier–store pair, and record every
+  entrance as a visit in `courier_store_visits` with its entry and exit time.
+- Keep a store summary on each courier (current store, last store, last entry time)
+  and return it with the total distance.
+- Validate coordinates and required fields; report every error with one uniform
+  `ErrorResponse` body (status, error, code, message, path, optional field errors).
+- Consume the same location reports from the Kafka topic `courier-locations` when the
+  Kafka ingress is enabled: at-least-once delivery, per-courier ordering by key,
+  retries for transient failures, and unprocessable messages skipped with one INFO
+  log line (a dead-letter topic is planned).
+- Manage schema with Liquibase; verify persistence against real PostgreSQL with Testcontainers.
+- Swagger UI, OpenAPI JSON/YAML, and an ordered curl walkthrough.
 
 ## Working cycle
 

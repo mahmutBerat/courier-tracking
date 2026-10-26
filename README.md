@@ -15,7 +15,8 @@ behavior is backed by unit and integration tests.
 location submission with duplicate suppression, travel-distance accumulation and
 query, and store-entry detection with the one-minute rule. Delivery acceptance (M7)
 was closed on 2026-10-26; see [Remaining work](#remaining-work) for what is
-intentionally left out.
+intentionally left out and the [documentation index](docs/README.md#key-capabilities)
+for the full capability list.
 
 ## Quick start
 
@@ -31,30 +32,6 @@ health checks, and runs the application on `http://localhost:8080`. Then open
 HTTP walkthrough (register a courier, submit locations, query the distance and store
 visits) and a Kafka tab with the sample producer commands and their HTTP
 verification. Stop with `Ctrl+C` and `make down`.
-
-## Key capabilities
-
-- Register couriers explicitly and list registered courier IDs.
-- Persist every distinct location report for traceability.
-- Suppress exact duplicates with a database unique constraint and native
-  `INSERT ... ON CONFLICT DO NOTHING`.
-- Accumulate Haversine distance in meters from each courier's last processed location.
-- Keep delayed and same-time reports without letting them change travel state.
-- Commit input storage and courier state in one transaction, serialized per courier
-  with `SELECT FOR UPDATE`.
-- Detect when a courier enters the 100 m area of any of the five supplied stores,
-  apply the one-minute re-entry rule per courier–store pair, and record every
-  entrance as a visit in `courier_store_visits` with its entry and exit time.
-- Keep a store summary on each courier (current store, last store, last entry time)
-  and return it with the total distance.
-- Validate coordinates and required fields; report every error with one uniform
-  `ErrorResponse` body (status, error, code, message, path, optional field errors).
-- Consume the same location reports from the Kafka topic `courier-locations` when the
-  Kafka ingress is enabled (`courier.kafka.enabled=true`, set by the `local` profile): at-least-once delivery, per-courier ordering by
-  key, retries for transient failures, and unprocessable messages skipped with one
-  INFO log line (a dead-letter topic is planned).
-- Manage schema with Liquibase; verify persistence against real PostgreSQL with Testcontainers.
-- Swagger UI, OpenAPI JSON/YAML, and an ordered curl walkthrough.
 
 ## Architecture
 
@@ -78,18 +55,8 @@ common/
   api/           OpenAPI configuration
 ```
 
-The controller calls the concrete `CourierService`. The service loads and locks
-the courier, stores the input, and invokes `Courier.updateDistance`, which owns the
-ordering and accumulation rules. When the report advanced travel state, the service
-hands it to `StoreEntryDetector`, which loads the courier's latest visit per store
-into `CourierStoreVisits` and checks every store in the catalog against it. That
-domain object opens a `StoreVisit` on each physical entry (the visit decides whether
-it counts) and closes the open visit of every store the courier left, so leaving one
-store while entering another is recorded as well; the detector saves what changed.
-The outcome names the visit opened and the store the courier is now inside, and the
-service writes that summary on the locked `Courier`.
-Queries receive `CourierSummary` records; entities never reach the controller.
-Domain objects never access repositories or HTTP types.
+The request flow through these packages is described step by step in the
+[implementation guide](docs/implementation-guide.md#request-processing).
 
 ### Design patterns
 
@@ -363,11 +330,6 @@ requests.
 
 ## Remaining work
 
-- Nothing remains for the case delivery: M7 was closed on 2026-10-26 after a clean
-  build with 187 passing tests, a green CI run, the owner's manual end-to-end
-  walkthrough, and the final documentation review.
-- Delivered beyond the case: the HTML test page (M8, `static/demo.html`) and the
-  optional Kafka ingress (M9, ADR-013).
 - Kafka follow-up: publish skipped messages to a dead-letter topic (S010-D14).
 - Not planned for this delivery: SpotBugs static analysis, trace correlation
   headers, OTLP export, a Postman collection, and Avro or a Schema Registry for
