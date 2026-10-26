@@ -53,14 +53,14 @@ public class CourierController {
         courierService.submitLocation(input);
     }
 
-    @Operation(summary = "Query total distance", description = "Returns the stored total in meters; zero before the first location.")
+    @Operation(summary = "Query total distance", description = "Returns the stored total in meters, the last entered store and its entry time, and whether the courier is currently in a store.")
     @ApiResponse(responseCode = "200", description = "Persisted courier distance")
     @ApiResponse(responseCode = "400", description = "Missing or blank courierId", content = @Content)
     @ApiResponse(responseCode = "404", description = "Courier is not registered", content = @Content)
     @GetMapping("/distance")
     public TotalDistanceResponse getTotalDistance(@Parameter(description = "Registered courier ID", example = "courier-1") @RequestParam("courierId") @NotBlank String courierId) {
-        double distanceMeters = courierService.findTotalDistanceMeters(courierId)
+        return courierService.findCourierSummary(courierId)
+                .map(courierMapper::toTotalDistanceResponse)
                 .orElseThrow(() -> new CourierNotFoundException(courierId));
-        return courierMapper.toTotalDistanceResponse(courierId, distanceMeters);
     }
 }

@@ -2,6 +2,7 @@ package com.mbi.couriertracking.courier.api;
 
 import com.mbi.couriertracking.common.geo.DistanceCalculatorStrategy;
 import com.mbi.couriertracking.courier.application.CourierService;
+import com.mbi.couriertracking.courier.application.CourierSummaryMapperImpl;
 import com.mbi.couriertracking.courier.persistence.CourierLocationMapperImpl;
 import com.mbi.couriertracking.courier.persistence.CourierLocationRepository;
 import com.mbi.couriertracking.courier.persistence.CourierRepository;
@@ -18,7 +19,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(CourierController.class)
-@Import({CourierService.class, CourierMapperImpl.class, CourierLocationMapperImpl.class})
+@Import({CourierService.class, CourierMapperImpl.class, CourierLocationMapperImpl.class, CourierSummaryMapperImpl.class})
 class CourierDistanceQueryTests {
 
     @MockitoBean

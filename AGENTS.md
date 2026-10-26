@@ -7,14 +7,13 @@ specification relevant to the current task.
 ## Local skills and conventions
 
 - For Java/Spring implementation or review, read
-  [spring-boot-engineer](docs/skills/spring-boot-engineer/SKILL.md) and its linked
-  project conventions.
+  [spring-boot-engineer](docs/skills/spring-boot-engineer/SKILL.md) and the
+  [implementation guide](docs/implementation-guide.md).
 - For service unit tests, read
   [write-simple-unit-tests](docs/skills/write-simple-unit-tests/SKILL.md).
-- For milestone reviews, use the [review checklist](docs/skills/review-checklist.md).
-- These are project-local adaptations of the ticketing reference. Use these paths
-  directly; they are not globally installed skills. See the
-  [reference assessment](docs/reference-practices.md) for provenance and limits.
+- For milestone reviews, follow [Milestone review](docs/README.md#milestone-review).
+- These are project-local adaptations of the ticketing reference (2026-10-21). Use
+  these paths directly; they are not globally installed skills.
 
 ## Working rules
 
@@ -25,8 +24,9 @@ specification relevant to the current task.
   the type directly visible, such as `new Courier(...)`.
 
 - Use feature-based packages: `courier/{api,application,domain,persistence}`,
-  `store/{domain,persistence}`, `common/mapping`, and the accepted shared
-  `common/geo` calculation package, under `com.mbi.couriertracking`.
+  `store/{domain,persistence}`, `common/mapping`, `common/persistence` (shared
+  `BaseEntity` base class), and the accepted shared `common/geo` calculation
+  package, under `com.mbi.couriertracking`.
   Create packages only when needed by actual code. Keep courier code and its tests
   in the courier feature; shared mapper configuration stays in `common.mapping`.
 - Controllers call concrete service classes directly. Do not introduce a service
@@ -63,8 +63,9 @@ specification relevant to the current task.
 - Defer detailed rule clarifications until their implementation milestone. Ask only
   what is needed for current work; preserve previous answers without re-asking them.
 - Record decisions explicitly made by the owner. Existing authorization remains
-  valid; do not request the same approval again. Summarize architectural decisions
-  as ADRs in the root README (Context, Decision, Alternatives, Trade-offs); keep
+  valid; do not request the same approval again. Record architectural decisions
+  as ADRs in `docs/architecture-decisions.md` (Context, Decision, Alternatives,
+  Trade-offs); the root README repeats only the five most important ones. Keep
   detailed behavior and evidence in the specification. Do not paste conversation
   quotes or review verdicts into documentation.
 - Keep proposals, accepted decisions, implemented behavior, and verified behavior

@@ -4,26 +4,27 @@ import com.mbi.couriertracking.common.geo.GeoLocation;
 import com.mbi.couriertracking.common.geo.HaversineDistanceCalculatorStrategy;
 import com.mbi.couriertracking.courier.api.CourierLocationInput;
 import com.mbi.couriertracking.courier.domain.Courier;
+import com.mbi.couriertracking.courier.domain.StoreStatus;
 import com.mbi.couriertracking.courier.persistence.CourierLocationMapperImpl;
 import com.mbi.couriertracking.courier.persistence.CourierLocationRepository;
 import com.mbi.couriertracking.courier.persistence.CourierRepository;
 import com.mbi.couriertracking.store.application.StoreEntryDetector;
+import com.mbi.couriertracking.store.domain.StoreVisit;
+import com.mbi.couriertracking.store.domain.StoreVisitResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.data.domain.Sort;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
@@ -43,7 +44,7 @@ class CourierServiceTests {
     @BeforeEach
     void setUp() {
         service = new CourierService(inputs, new CourierLocationMapperImpl(),
-                couriers, new HaversineDistanceCalculatorStrategy(), storeEntryDetector);
+                couriers, new HaversineDistanceCalculatorStrategy(), storeEntryDetector, new CourierSummaryMapperImpl());
     }
 
     @Test
@@ -78,6 +79,8 @@ class CourierServiceTests {
         var courier = new Courier("courier-1");
         when(couriers.findForUpdate("courier-1")).thenReturn(Optional.of(courier));
         when(inputs.insertIfAbsent(any())).thenReturn(1);
+
+        when(storeEntryDetector.detectEntries(any(), any(), any())).thenReturn(StoreVisitResult.outside());
 
         service.submitLocation(input);
 
@@ -123,6 +126,8 @@ class CourierServiceTests {
         when(inputs.insertIfAbsent(any())).thenReturn(1);
         when(couriers.findForUpdate("courier-1")).thenReturn(Optional.of(courier));
 
+        when(storeEntryDetector.detectEntries(any(), any(), any())).thenReturn(StoreVisitResult.outside());
+
         service.submitLocation(input);
 
         assertEquals(input.lat(), courier.getLastLatitude());
@@ -131,11 +136,31 @@ class CourierServiceTests {
         assertEquals(0.0, courier.getTotalDistanceMeters());
         verify(couriers, never()).insertIfAbsent(any());
     }
+
+    @Test
+    void StoreVisitResultUpdatesCourierSummary() {
+        var courier = new Courier("courier-1");
+        when(couriers.findForUpdate("courier-1")).thenReturn(Optional.of(courier));
+        when(inputs.insertIfAbsent(any())).thenReturn(1);
+        StoreVisit visit = StoreVisit.open("courier-1", "Ataşehir MMM Migros", Instant.parse("2026-10-21T12:00:00.123Z"));
+        when(storeEntryDetector.detectEntries(any(), any(), any()))
+                .thenReturn(new StoreVisitResult(Optional.of(visit), true, Optional.of("Ataşehir MMM Migros")));
+
+        service.submitLocation(input);
+
+        assertEquals("Ataşehir MMM Migros", courier.getLastStoreName());
+        assertEquals("Ataşehir MMM Migros", courier.getCurrentStoreName());
+        assertEquals(Instant.parse("2026-10-21T12:00:00.123Z"), courier.getLastStoreEntryTime());
+        assertEquals(StoreStatus.IN_STORE, courier.getStoreStatus());
+        assertTrue(courier.isLastReportEntered());
+    }
+
     @Test
     void registeredCourierWithoutLocationsHasZeroDistance() {
         when(couriers.findById("courier-1")).thenReturn(Optional.of(new Courier("courier-1")));
 
-        assertThat(service.findTotalDistanceMeters("courier-1")).hasValue(0);
+        assertThat(service.findCourierSummary("courier-1"))
+                .hasValue(new CourierSummary("courier-1", 0.0, null, null, StoreStatus.OUT_STORE, false));
         verifyNoInteractions(inputs);
         verify(couriers, never()).findForUpdate(any());
     }
@@ -148,16 +173,36 @@ class CourierServiceTests {
         courier.updateDistance(new GeoLocation(0, 1), input.time().plusSeconds(1), calculator);
         when(couriers.findById("courier-1")).thenReturn(Optional.of(courier));
 
-        assertThat(service.findTotalDistanceMeters("courier-1")).hasValue(courier.getTotalDistanceMeters());
+        assertThat(service.findCourierSummary("courier-1"))
+                .hasValue(new CourierSummary("courier-1", courier.getTotalDistanceMeters(), null, null, StoreStatus.OUT_STORE, false));
         verifyNoInteractions(inputs);
         verify(couriers, never()).findForUpdate(any());
+    }
+
+    @Test
+    void courierSummaryCarriesTheStoreFieldsOfTheEntity() {
+        var courier = new Courier("courier-1");
+        courier.recordStoreEntry("Ataşehir MMM Migros", input.time());
+        courier.updateCurrentStore(Optional.of("Ataşehir MMM Migros"), true);
+        when(couriers.findById("courier-1")).thenReturn(Optional.of(courier));
+
+        assertThat(service.findCourierSummary("courier-1")).hasValue(new CourierSummary("courier-1", 0.0,
+                "Ataşehir MMM Migros", Instant.parse("2026-10-21T12:00:00.123Z"), StoreStatus.IN_STORE, true));
+    }
+
+    @Test
+    void listedCouriersAreSummariesInIdOrder() {
+        when(couriers.findAll(Sort.by("courierId")))
+                .thenReturn(List.of(new Courier("courier-1"), new Courier("courier-2")));
+
+        assertThat(service.listCouriers()).extracting(CourierSummary::courierId).containsExactly("courier-1", "courier-2");
     }
 
     @Test
     void unknownCourierHasNoDistanceAndIsNotCreated() {
         when(couriers.findById("missing")).thenReturn(Optional.empty());
 
-        assertTrue(service.findTotalDistanceMeters("missing").isEmpty());
+        assertTrue(service.findCourierSummary("missing").isEmpty());
         verifyNoInteractions(inputs);
         verify(couriers, never()).insertIfAbsent(any());
     }

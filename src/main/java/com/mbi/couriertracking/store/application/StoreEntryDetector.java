@@ -2,55 +2,41 @@ package com.mbi.couriertracking.store.application;
 
 import com.mbi.couriertracking.common.geo.DistanceCalculatorStrategy;
 import com.mbi.couriertracking.common.geo.GeoLocation;
-import com.mbi.couriertracking.store.domain.ProximityCheck;
+import com.mbi.couriertracking.store.domain.CourierStoreVisits;
 import com.mbi.couriertracking.store.domain.Store;
 import com.mbi.couriertracking.store.domain.StoreCatalog;
-import com.mbi.couriertracking.store.domain.StoreProximityState;
-import com.mbi.couriertracking.store.persistence.StoreEntryRepository;
-import com.mbi.couriertracking.store.persistence.StoreProximityStateRepository;
+import com.mbi.couriertracking.store.domain.StoreVisitResult;
+import com.mbi.couriertracking.store.persistence.StoreVisitRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
-import java.util.Map;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
- * Evaluates one processed courier location against every store in the catalog, records each
- * entry, and keeps the inside/outside state of every pair current, so leaving one store while
- * entering another is recorded. Runs inside the caller's courier transaction, which already
- * holds the courier row lock, so pair state needs no lock of its own.
+ * Evaluates one processed courier location against every store in the catalog: opens a visit on
+ * entry, closes the open visit on exit, and reports which store the courier is inside afterwards.
+ * Runs inside the caller's courier transaction, which already holds the courier row lock, so
+ * visits need no lock of their own.
  */
 @Service
 @RequiredArgsConstructor
 public class StoreEntryDetector {
 
     private final StoreCatalog storeCatalog;
-    private final StoreProximityStateRepository proximityStateRepository;
-    private final StoreEntryRepository storeEntryRepository;
+    private final StoreVisitRepository storeVisitRepository;
     private final DistanceCalculatorStrategy distanceCalculator;
 
     @Transactional(propagation = Propagation.MANDATORY)
-    public void detectEntries(String courierId, GeoLocation location, Instant inputTime) {
-        // One query for the courier's pair states (at most one per store) instead of one per store.
-        Map<String, StoreProximityState> statesByStoreName = proximityStateRepository.findByCourierId(courierId).stream()
-                .collect(Collectors.toMap(StoreProximityState::getStoreName, Function.identity()));
+    public StoreVisitResult detectEntries(String courierId, GeoLocation location, Instant inputTime) {
+        // One query: the latest visit per store carries both "open?" and the previous entry time.
+        CourierStoreVisits visits = CourierStoreVisits.of(courierId, storeVisitRepository.findLatestPerStore(courierId));
 
         for (Store store : storeCatalog.stores()) {
             double distanceMeters = distanceCalculator.distanceMeters(location, store.location());
-
-            StoreProximityState state = statesByStoreName.getOrDefault(store.name(),
-                    StoreProximityState.initial(courierId, store.name()));
-
-            ProximityCheck check = state.checkProximity(distanceMeters, inputTime);
-            if (check.changedState()) {
-                proximityStateRepository.save(state);
-            }
-            check.entry().ifPresent(storeEntryRepository::save);
+            visits.checkProximity(store.name(), distanceMeters, inputTime).ifPresent(storeVisitRepository::save);
         }
+        return visits.outcome();
     }
-
 }

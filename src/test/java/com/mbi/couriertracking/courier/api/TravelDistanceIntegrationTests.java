@@ -23,6 +23,7 @@ import java.util.concurrent.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.closeTo;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -95,7 +96,11 @@ class TravelDistanceIntegrationTests {
         mvc.perform(get("/api/v1/couriers/distance").param("courierId", "courier-1"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.courierId").value("courier-1"))
-                .andExpect(jsonPath("$.distanceMeters").value(0));
+                .andExpect(jsonPath("$.distanceMeters").value(0))
+                .andExpect(jsonPath("$.lastStoreName").value(nullValue()))
+                .andExpect(jsonPath("$.lastStoreEntryTime").value(nullValue()))
+                .andExpect(jsonPath("$.currentStatus").value("out-store"))
+                .andExpect(jsonPath("$.isEntry").value(false));
 
         assertNull(courier("courier-1").getLastProcessedTime());
     }

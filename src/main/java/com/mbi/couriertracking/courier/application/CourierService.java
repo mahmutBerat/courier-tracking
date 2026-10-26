@@ -9,6 +9,7 @@ import com.mbi.couriertracking.courier.persistence.CourierLocationRecord;
 import com.mbi.couriertracking.courier.persistence.CourierLocationRepository;
 import com.mbi.couriertracking.courier.persistence.CourierRepository;
 import com.mbi.couriertracking.store.application.StoreEntryDetector;
+import com.mbi.couriertracking.store.domain.StoreVisitResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Sort;
@@ -16,10 +17,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.OptionalDouble;
+import java.util.Optional;
 
 /**
- * Stores distinct inputs, advances travel state, and detects store entries in one transaction.
+ * Stores distinct inputs, advances travel state, and records store visits and the courier's store summary in one transaction.
  */
 @Service
 @RequiredArgsConstructor
@@ -31,6 +32,7 @@ public class CourierService {
     private final CourierRepository courierRepository;
     private final DistanceCalculatorStrategy distanceCalculator;
     private final StoreEntryDetector storeEntryDetector;
+    private final CourierSummaryMapper summaryMapper;
 
     @Transactional
     public void createCourier(String courierId) {
@@ -40,8 +42,8 @@ public class CourierService {
     }
 
     @Transactional(readOnly = true)
-    public List<Courier> listCouriers() {
-        return courierRepository.findAll(Sort.by("courierId"));
+    public List<CourierSummary> listCouriers() {
+        return courierRepository.findAll(Sort.by("courierId")).stream().map(summaryMapper::toSummary).toList();
     }
 
     @Transactional
@@ -59,14 +61,15 @@ public class CourierService {
 
         boolean isUpdated = courier.updateDistance(location, courierLocation.getTime(), distanceCalculator);
         if (isUpdated) {
-            storeEntryDetector.detectEntries(courier.getCourierId(), location, courierLocation.getTime());
+            StoreVisitResult outcome = storeEntryDetector.detectEntries(courier.getCourierId(), location, courierLocation.getTime());
+            outcome.entered().ifPresent(visit -> courier.recordStoreEntry(visit.getStoreName(), visit.getEntryTime()));
+            courier.updateCurrentStore(outcome.currentStoreName(), outcome.entrance());
         }
     }
 
+    /** The persisted total distance and store summary; empty when not registered. */
     @Transactional(readOnly = true)
-    public OptionalDouble findTotalDistanceMeters(String courierId) {
-        return courierRepository.findById(courierId)
-                .map(courier -> OptionalDouble.of(courier.getTotalDistanceMeters()))
-                .orElseGet(OptionalDouble::empty);
+    public Optional<CourierSummary> findCourierSummary(String courierId) {
+        return courierRepository.findById(courierId).map(summaryMapper::toSummary);
     }
 }

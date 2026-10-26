@@ -8,8 +8,8 @@ import com.mbi.couriertracking.courier.application.CourierService;
 import com.mbi.couriertracking.courier.domain.Courier;
 import com.mbi.couriertracking.courier.persistence.CourierLocationRepository;
 import com.mbi.couriertracking.courier.persistence.CourierRepository;
-import com.mbi.couriertracking.store.domain.StoreEntry;
-import com.mbi.couriertracking.store.persistence.StoreEntryRepository;
+import com.mbi.couriertracking.store.domain.StoreVisit;
+import com.mbi.couriertracking.store.persistence.StoreVisitRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,7 +21,6 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.TransientDataAccessResourceException;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -39,8 +38,7 @@ import static org.mockito.Mockito.*;
 /**
  * S010-AC01–AC10 against a real broker and database; skipped records are recognized by their INFO log line and key.
  */
-@SpringBootTest
-@ActiveProfiles("kafka")
+@SpringBootTest(properties = "courier.kafka.enabled=true")
 @ExtendWith(OutputCaptureExtension.class)
 @Import({TestcontainersConfiguration.class, KafkaTestcontainersConfiguration.class})
 class CourierLocationKafkaIntegrationTests {
@@ -61,14 +59,14 @@ class CourierLocationKafkaIntegrationTests {
     @Autowired
     private CourierLocationRepository courierLocationRepository;
     @Autowired
-    private StoreEntryRepository storeEntryRepository;
+    private StoreVisitRepository storeVisitRepository;
     @MockitoSpyBean
     private CourierService courierService;
 
     @BeforeEach
     void clearState() {
         courierLocationRepository.deleteAllInBatch();
-        courierRepository.deleteAllInBatch(); // cascades to proximity state and entries
+        courierRepository.deleteAllInBatch(); // cascades to store visits
     }
 
     @AfterEach
@@ -89,20 +87,20 @@ class CourierLocationKafkaIntegrationTests {
     }
 
     @Test
-    void messageAtTheStoreRecordsOneCountedEntry() throws Exception {
+    void messageAtTheStoreRecordsOneVisit() throws Exception {
         register("kafka-ac02");
 
         sendMessage("kafka-ac02", payload("kafka-ac02", FIRST_TIME, ATASEHIR));
 
         awaitInputs(1);
-        List<StoreEntry> entries = storeEntryRepository.findByCourierIdOrderByEntryTime("kafka-ac02");
+        List<StoreVisit> entries = storeVisitRepository.findByCourierIdOrderByEntryTime("kafka-ac02");
         assertEquals(1, entries.size());
         assertEquals("Ataşehir MMM Migros", entries.getFirst().getStoreName());
-        assertTrue(entries.getFirst().isCounted());
+        assertTrue(entries.getFirst().isOpen());
     }
 
     @Test
-    void multipleMessagesAtTheStoreInOneMinuteRecordsOneCountedEntry() throws Exception {
+    void multipleMessagesInsideTheStoreRecordOneVisit() throws Exception {
         register("kafka-ac02");
 
         String firstTime = "2026-10-21T12:00:00Z";
@@ -114,12 +112,12 @@ class CourierLocationKafkaIntegrationTests {
         sendMessage("kafka-ac02", payload("kafka-ac02", thirdTime, ATASEHIR));
 
         awaitInputs(3);
-        List<StoreEntry> entries = storeEntryRepository.findByCourierIdOrderByEntryTime("kafka-ac02");
+        List<StoreVisit> entries = storeVisitRepository.findByCourierIdOrderByEntryTime("kafka-ac02");
         assertEquals(1, entries.size());
-        StoreEntry storeEntry = entries.getFirst();
+        StoreVisit storeEntry = entries.getFirst();
         assertEquals("Ataşehir MMM Migros", storeEntry.getStoreName());
         assertEquals(firstTime, storeEntry.getEntryTime().toString());
-        assertTrue(storeEntry.isCounted());
+        assertTrue(storeEntry.isOpen());
     }
 
     @Test

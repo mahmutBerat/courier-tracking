@@ -3,6 +3,8 @@ package com.mbi.couriertracking.courier.api;
 import com.mbi.couriertracking.courier.application.CourierAlreadyExistsException;
 import com.mbi.couriertracking.courier.application.CourierNotFoundException;
 import com.mbi.couriertracking.courier.application.CourierService;
+import com.mbi.couriertracking.courier.application.CourierSummary;
+import com.mbi.couriertracking.courier.domain.StoreStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -18,7 +20,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultMatcher;
 
 import java.time.Instant;
-import java.util.OptionalDouble;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static org.mockito.Mockito.*;
@@ -64,28 +66,32 @@ class CourierControllerTests {
     @ParameterizedTest
     @ValueSource(doubles = {0.0, 1234.56})
     void returnsDistanceInMetersForKnownCourier(double distanceMeters) throws Exception {
-        when(courierService.findTotalDistanceMeters("courier-1"))
-                .thenReturn(OptionalDouble.of(distanceMeters));
+        when(courierService.findCourierSummary("courier-1")).thenReturn(Optional.of(new CourierSummary("courier-1",
+                distanceMeters, "Ataşehir MMM Migros", Instant.parse("2026-10-21T12:00:00Z"), StoreStatus.IN_STORE, true)));
 
         mvc.perform(get(DISTANCE_PATH).param("courierId", "courier-1"))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$.courierId").value("courier-1"))
-                .andExpect(jsonPath("$.distanceMeters").value(distanceMeters));
+                .andExpect(jsonPath("$.distanceMeters").value(distanceMeters))
+                .andExpect(jsonPath("$.lastStoreName").value("Ataşehir MMM Migros"))
+                .andExpect(jsonPath("$.lastStoreEntryTime").value("2026-10-21T12:00:00Z"))
+                .andExpect(jsonPath("$.currentStatus").value("in-store"))
+                .andExpect(jsonPath("$.isEntry").value(true));
 
-        verify(courierService).findTotalDistanceMeters("courier-1");
+        verify(courierService).findCourierSummary("courier-1");
     }
 
     @Test
     void returnsNotFoundForUnknownCourier() throws Exception {
-        when(courierService.findTotalDistanceMeters("unknown")).thenReturn(OptionalDouble.empty());
+        when(courierService.findCourierSummary("unknown")).thenReturn(Optional.empty());
 
         mvc.perform(get(DISTANCE_PATH).param("courierId", "unknown"))
                 .andExpect(errorResponse(404, "COURIER_NOT_FOUND", DISTANCE_PATH))
                 .andExpect(jsonPath("$.message").value("Courier not found."))
                 .andExpect(jsonPath("$.fieldErrors").doesNotExist());
 
-        verify(courierService).findTotalDistanceMeters("unknown");
+        verify(courierService).findCourierSummary("unknown");
     }
 
     @Test

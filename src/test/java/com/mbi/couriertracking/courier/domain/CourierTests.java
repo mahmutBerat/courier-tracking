@@ -8,6 +8,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -78,5 +79,54 @@ class CourierTests {
         assertEquals(1.0, courier.getLastLatitude());
         assertEquals(2.0, courier.getLastLongitude());
         assertEquals(start, courier.getLastProcessedTime());
+    }
+
+    @Test
+    void newCourierIsOutOfStoreWithoutSummary() {
+        var courier = new Courier("courier-1");
+
+        assertEquals(StoreStatus.OUT_STORE, courier.getStoreStatus());
+        assertNull(courier.getCurrentStoreName());
+        assertNull(courier.getLastStoreName());
+        assertNull(courier.getLastStoreEntryTime());
+    }
+
+    @Test
+    void recordingAnEntrySetsLastStoreAndTime() {
+        var courier = new Courier("courier-1");
+
+        courier.recordStoreEntry("Ataşehir MMM Migros", start.plusNanos(123_456_789));
+
+        assertEquals("Ataşehir MMM Migros", courier.getLastStoreName());
+        assertEquals(start.plusMillis(123), courier.getLastStoreEntryTime());
+        assertNull(courier.getCurrentStoreName());
+        assertEquals(StoreStatus.OUT_STORE, courier.getStoreStatus());
+    }
+
+    @Test
+    void updatingCurrentStoreDerivesInStore() {
+        var courier = new Courier("courier-1");
+        courier.recordStoreEntry("Ataşehir MMM Migros", start);
+
+        courier.updateCurrentStore(Optional.of("Ataşehir MMM Migros"), true);
+        assertEquals(StoreStatus.IN_STORE, courier.getStoreStatus());
+        assertEquals("Ataşehir MMM Migros", courier.getCurrentStoreName());
+        assertTrue(courier.isLastReportEntered());
+
+        courier.updateCurrentStore(Optional.empty(), false);
+        assertEquals(StoreStatus.OUT_STORE, courier.getStoreStatus());
+        assertFalse(courier.isLastReportEntered());
+        assertNull(courier.getCurrentStoreName());
+        assertEquals("Ataşehir MMM Migros", courier.getLastStoreName());
+        assertEquals(start, courier.getLastStoreEntryTime());
+    }
+
+    @Test
+    void currentStoreWithoutAnyEntryIsRejected() {
+        var courier = new Courier("courier-1");
+
+        assertThrows(IllegalStateException.class,
+                () -> courier.updateCurrentStore(Optional.of("Ataşehir MMM Migros"), true));
+        assertEquals(StoreStatus.OUT_STORE, courier.getStoreStatus());
     }
 }

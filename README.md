@@ -16,6 +16,21 @@ location submission with duplicate suppression, travel-distance accumulation and
 query, and store-entry detection with the one-minute rule. See
 [Remaining work](#remaining-work) for delivery polish.
 
+## Quick start
+
+Requirements: JDK 25, Docker Engine/Desktop with Compose v2, GNU Make.
+
+```sh
+make run
+```
+
+This starts PostgreSQL and a single-node Kafka broker in Compose, waits for their
+health checks, and runs the application on `http://localhost:8080`. Then open
+[demo.html](http://localhost:8080/demo.html): a plain browser page that runs the
+HTTP walkthrough (register a courier, submit locations, query the distance and store
+visits) and a Kafka tab with the sample producer commands and their HTTP
+verification. Stop with `Ctrl+C` and `make down`.
+
 ## Key capabilities
 
 - Register couriers explicitly and list registered courier IDs.
@@ -27,12 +42,14 @@ query, and store-entry detection with the one-minute rule. See
 - Commit input storage and courier state in one transaction, serialized per courier
   with `SELECT FOR UPDATE`.
 - Detect when a courier enters the 100 m area of any of the five supplied stores,
-  apply the one-minute re-entry rule per courier–store pair, and record every entry
-  with its counted flag in `store_entries`.
+  apply the one-minute re-entry rule per courier–store pair, and record every
+  entrance as a visit in `courier_store_visits` with its entry and exit time.
+- Keep a store summary on each courier (current store, last store, last entry time)
+  and return it with the total distance.
 - Validate coordinates and required fields; report every error with one uniform
   `ErrorResponse` body (status, error, code, message, path, optional field errors).
 - Consume the same location reports from the Kafka topic `courier-locations` when the
-  optional `kafka` profile is active: at-least-once delivery, per-courier ordering by
+  Kafka ingress is enabled (`courier.kafka.enabled=true`, set by the `local` profile): at-least-once delivery, per-courier ordering by
   key, retries for transient failures, and unprocessable messages skipped with one
   INFO log line (a dead-letter topic is planned).
 - Manage schema with Liquibase; verify persistence against real PostgreSQL with Testcontainers.
@@ -45,35 +62,40 @@ Feature-first modular monolith under `com.mbi.couriertracking`:
 ```text
 courier/
   api/           Controller, request/response records, response mapper, exception advice
-  application/   CourierService: use-case orchestration and transaction boundary
-  domain/        Courier aggregate: travel ordering and accumulation rules
+  application/   CourierService: use-case orchestration and transaction boundary; CourierSummary read model
+  domain/        Courier aggregate: travel ordering, accumulation rules, store summary
   persistence/   Input history record, Spring Data repositories, persistence mapper
-  messaging/     Kafka inbound adapter: message record, mapper, listener, Kafka configuration (kafka profile)
+  messaging/     Kafka inbound adapter: message record, mapper, listener, Kafka configuration (created only when `courier.kafka.enabled=true`)
 store/
   application/   StoreEntryDetector, catalog loading from stores.json
-  domain/        Store, StoreCatalog, StoreProximityState (entry rules), StoreEntry
-  persistence/   Spring Data repositories for pair state and entries
+  domain/        Store, StoreCatalog, StoreVisit (entry rules, open/closed visit), CourierStoreVisits (per-report transitions)
+  persistence/   Spring Data repository for visits (latest visit per store query)
 common/
   geo/           GeoLocation value object and distance Strategy (Haversine)
   mapping/       Shared MapStruct configuration
+  persistence/   BaseEntity: created_at/updated_at base class for every JPA entity
   api/           OpenAPI configuration
 ```
 
 The controller calls the concrete `CourierService`. The service loads and locks
 the courier, stores the input, and invokes `Courier.updateDistance`, which owns the
 ordering and accumulation rules. When the report advanced travel state, the service
-hands it to `StoreEntryDetector`, which walks the whole store catalog and lets
-each `StoreProximityState` decide whether a physical entry occurred and whether
-it counts, so leaving one store while entering another is recorded as well.
+hands it to `StoreEntryDetector`, which loads the courier's latest visit per store
+into `CourierStoreVisits` and checks every store in the catalog against it. That
+domain object opens a `StoreVisit` on each physical entry (the visit decides whether
+it counts) and closes the open visit of every store the courier left, so leaving one
+store while entering another is recorded as well; the detector saves what changed.
+The outcome names the visit opened and the store the courier is now inside, and the
+service writes that summary on the locked `Courier`.
+Queries receive `CourierSummary` records; entities never reach the controller.
 Domain objects never access repositories or HTTP types.
 
 ### Design patterns
 
-| Pattern    | Where                                                                                    | Purpose                                                                                                                                     |
-|------------|------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
-| Strategy   | `DistanceCalculatorStrategy` / `HaversineDistanceCalculatorStrategy`                     | Keeps the geographic formula replaceable and the domain independent of it; one strategy serves both travel segments and store proximity     |
-| Repository | `CourierRepository`, `CourierLocationRepository`, `StoreProximityStateRepository`, `StoreEntryRepository` (Spring Data JPA) | Encapsulates persistence behind interfaces used only by application services; domain objects never touch them                               |
-| Adapter    | `courier.messaging.CourierLocationKafkaListener` with `CourierLocationMessageMapper` (optional `kafka` profile) | Adapts Kafka records to the `submitLocation` use case: parse, map, validate, delegate. The service and domain never see the transport; HTTP and Kafka share one validation and one transaction path |
+| Pattern  | Where                                                                                        | Purpose                                                                                                                                                                                             |
+|----------|----------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Strategy | `DistanceCalculatorStrategy` / `HaversineDistanceCalculatorStrategy`                         | Keeps the geographic formula replaceable and the domain independent of it; one strategy serves both travel segments and store proximity                                                             |
+| Adapter  | `CourierLocationKafkaAdapter` with `CourierLocationMessageMapper` (created only when `courier.kafka.enabled=true`) | Adapts Kafka records to the `submitLocation` use case: parse, map, validate, delegate. The service and domain never see the transport; HTTP and Kafka share one validation and one transaction path |
 
 ## API overview
 
@@ -82,13 +104,13 @@ Domain objects never access repositories or HTTP types.
 | POST   | `/api/v1/couriers`                        | Register an ID: `201`; `409` if it exists; `400` if blank                                                                                               |
 | GET    | `/api/v1/couriers`                        | Sorted array of `{"courierId"}`; `[]` when empty                                                                                                        |
 | POST   | `/api/v1/couriers/locations`              | Store the report and update travel distance: `204` (also for exact duplicates); `400` invalid fields/coordinates; `404` unknown courier; `415` non-JSON |
-| GET    | `/api/v1/couriers/distance?courierId=...` | `200` `{"courierId","distanceMeters"}` (zero before any location); `404` unknown courier; `400` missing/blank parameter                                 |
+| GET    | `/api/v1/couriers/distance?courierId=...` | `200` `{"courierId","distanceMeters","lastStoreName","lastStoreEntryTime","currentStatus","isEntry"}`: distance zero before any location, store fields null before the first entry, `currentStatus` is `in-store` or `out-store`, `isEntry` is true only when the last processed report opened a new visit; `404` unknown courier; `400` missing/blank parameter |
 | GET    | `/actuator/health`                        | Application health                                                                                                                                      |
 
 POST location body: `{"time":"2026-10-21T12:00:00Z","courier":"courier-1","lat":40.9923307,"lng":29.1244229}`.
 `time` is a UTC instant (explicit offsets are normalized); latitude must be within
 [-90, 90] and longitude within [-180, 180]. See [Swagger and curl examples](docs/api-examples.md).
-With the `kafka` profile the same JSON arrives as a message on `courier-locations`
+With the Kafka ingress enabled the same JSON arrives as a message on `courier-locations`
 (key = courier ID); see [Kafka messages](docs/api-examples.md#kafka-messages).
 
 ## Processing rules in brief
@@ -101,20 +123,30 @@ With the `kafka` profile the same JSON arrives as a message on `courier-location
    adds the Haversine distance from the last processed location and becomes the
    new last location/time. Older or same-time distinct reports are stored but do
    not change travel state; the next segment still starts from the last processed location.
-5. A report that advanced travel state is compared with the stores in catalog
-   order until one is entered. Moving from outside to inside the 100 m area
-   (inclusive) is a physical entry. It is counted
-   unless the same courier–store pair had a physical entry less than 60 s earlier
-   (by input time); either way the entry is recorded in `store_entries` with its
-   `counted` flag, which is the entry log required by the case.
-6. Input storage, courier state, pair state, and entries commit together; a
-   failure rolls back all of them.
-7. Distance queries read persisted courier state only; input history is never replayed.
+5. A report that advanced travel state is compared with every store in catalog
+   order. Moving from outside to inside the 100 m area (inclusive) is a physical
+   entry and opens a visit in `courier_store_visits`, which is the entry log required
+   by the case. If the pair's latest visit began less than 60 s earlier (by input
+   time), the re-entry is not an entrance: that visit resumes and no row is added.
+   The first report outside the area closes the visit with its `exit_time`; an open
+   visit means the courier is inside.
+6. The courier row keeps `current_store_name`, `last_store_name`,
+   `last_store_entry_time`, and `last_report_entered` (whether the last processed
+   report opened a new visit); input storage, courier state, and visits commit
+   together, and a failure rolls back all of them.
+7. Distance queries read the persisted courier row only (total, last store, last
+   entry time, in-store/out-store, entrance flag); input history and visits are
+   never replayed.
 
 ## Architectural decisions
 
-Decisions are summarized here in ADR form. The linked specifications hold the
-detailed behavior, acceptance criteria, and verification evidence.
+The five decisions that shape the system are summarized here in ADR form. All
+fifteen, including the API contract, duplicate suppression, travel ordering, the
+Haversine Strategy, registration, the platform, CI, Kafka ingress, and audit
+timestamps, are recorded with the same structure in
+[Architectural decisions](docs/architecture-decisions.md). The linked
+specifications hold detailed behavior, acceptance criteria, and verification
+evidence.
 
 ### ADR-001: Modular monolith with feature-first packages
 
@@ -128,30 +160,6 @@ detailed behavior, acceptance criteria, and verification evidence.
 - **Trade-offs:** Simple deployment and transactions, readable ownership per feature;
   features cannot scale independently. Spec: [S003](docs/specs/003-application-structure.md).
 
-### ADR-002: API-first REST contract with a uniform error body
-
-- **Context:** The case supplies the input fields (`time`, `courier`, `lat`, `lng`)
-  and a query for total distance.
-- **Decision:** Define the HTTP contract first: POST `/api/v1/couriers/locations`
-  returns `204`; GET `/api/v1/couriers/distance?courierId=` returns `200` with
-  `courierId` and `distanceMeters` or `404`. Courier IDs are strings; `time` binds
-  to `Instant`. Errors were first delivered as RFC 9457 Problem Details; amended on
-  2026-10-23 so that every error, including framework-generated `400` and `415`
-  responses, returns the project's `ErrorResponse` record (`status`, `error`,
-  `code`, `message`, `path`, optional `fieldErrors`) through `ApiExceptionHandler`,
-  which still extends `ResponseEntityExceptionHandler` and translates its bodies.
-  Application outcomes are domain exceptions (`CourierNotFoundException`,
-  `CourierAlreadyExistsException`) mapped to `404` and `409` in the handler.
-- **Alternatives:** Courier ID as a path variable; keeping Problem Details
-  (the original choice); a custom body only for application errors with framework
-  errors left as Problem Details.
-- **Trade-offs:** The custom body carries a stable `code` and field-level
-  violations that clients and the planned Kafka dead-letter handling can rely on,
-  at the cost of maintaining an envelope instead of the standard media type. One
-  shape for all errors avoids two formats on one API. The query-parameter style
-  keeps the courier ID out of the path at the cost of a less conventional resource
-  URL. Spec: [S002](docs/specs/002-api-contract-and-controllers.md).
-
 ### ADR-003: Input history separate from current state
 
 - **Context:** Every report should be traceable, but calculations must stay cheap
@@ -159,26 +167,13 @@ detailed behavior, acceptance criteria, and verification evidence.
 - **Decision:** Store each distinct report in `courier_location_inputs` (write-only
   for normal processing). Keep the current calculation state (last location, last
   processed time, total distance) on the `Courier` aggregate in `couriers`.
-  Queries read `couriers` only.
+  Distance queries read `couriers` only, including its store summary (ADR-014),
+  without scanning input history or visits.
 - **Alternatives:** Recompute totals from history on each query; event sourcing.
 - **Trade-offs:** O(1) reads and writes per report and a clear audit trail; a bug in
   accumulation cannot be corrected by re-reading history without an explicit
   replay tool, which is deliberately out of scope.
   Spec: [S004](docs/specs/004-location-submission.md), [S005](docs/specs/005-travel-distance-processing.md).
-
-### ADR-004: Database-level duplicate suppression
-
-- **Context:** Streaming clients retry; the same report may arrive more than once,
-  including concurrently.
-- **Decision:** Report identity is `(courier, time truncated to milliseconds, lat, lng)`,
-  enforced by a unique constraint and a native `INSERT ... ON CONFLICT DO NOTHING`.
-  Duplicates return `204` and skip all calculation. No idempotency header, no cache.
-- **Alternatives:** Client-supplied `Idempotency-Key`; in-memory recent-report cache;
-  preliminary `SELECT` before insert.
-- **Trade-offs:** Correct across concurrent requests, restarts, and multiple
-  instances with one statement; identity is content-based, so a genuinely new
-  report with identical content is indistinguishable from a retry (accepted for
-  GPS data). Millisecond precision discards finer fractions. Spec: [S004](docs/specs/004-location-submission.md).
 
 ### ADR-005: Per-courier pessimistic locking in one short transaction
 
@@ -195,46 +190,6 @@ detailed behavior, acceptance criteria, and verification evidence.
   transaction timeout is configured; contention behavior is left to the database
   and connection pool defaults. Spec: [S005](docs/specs/005-travel-distance-processing.md).
 
-### ADR-006: Travel ordering by input time, strictly newer only
-
-- **Context:** Reports can arrive delayed or out of order; processing time is not
-  a reliable movement clock.
-- **Decision:** Compare each report's `time` (millisecond precision) with the
-  courier's last processed time. Only a strictly newer report adds a segment and
-  advances state; older or same-time distinct reports are stored but ignored for
-  distance. No re-sorting or recalculation of history.
-- **Alternatives:** Process in arrival order; buffer and sort by time; recompute
-  when a late report arrives.
-- **Trade-offs:** Deterministic and cheap; a late report that was genuinely part of
-  the route is not counted, so totals are a lower bound under heavy reordering.
-  Spec: [S005](docs/specs/005-travel-distance-processing.md).
-
-### ADR-007: Haversine distance behind a Strategy
-
-- **Context:** Both travel segments and store proximity need a distance in meters
-  between two coordinates.
-- **Decision:** `GeoLocation` is an immutable value object validating finite,
-  inclusive ranges. `DistanceCalculatorStrategy` is the abstraction;
-  `HaversineDistanceCalculatorStrategy` uses a spherical Earth with
-  R = 6,371,000 m, `double` precision, no display rounding, and clamps the
-  intermediate term against floating-point drift.
-- **Alternatives:** Vincenty/geodesic formulas; road-network routing; `BigDecimal`.
-- **Trade-offs:** Sub-meter accuracy at this scale with trivial cost; the result is
-  the sum of straight segments between samples, not the road distance traveled.
-  Spec: [S005](docs/specs/005-travel-distance-processing.md).
-
-### ADR-008: Explicit courier registration
-
-- **Context:** Early increments created a courier row implicitly on the first
-  report, which made unknown IDs indistinguishable from typos.
-- **Decision:** Couriers are registered with POST `/api/v1/couriers` and listed
-  with GET. Location submission for an unregistered ID returns `404` without
-  storing anything. Registration never resets existing travel state.
-- **Alternatives:** Implicit creation on first report.
-- **Trade-offs:** One extra call before streaming, but a clear lifecycle, a
-  meaningful `404`, and no accidental couriers.
-  Spec: [S006](docs/specs/006-courier-registration.md).
-
 ### ADR-009: Store entry semantics
 
 - **Context:** The case requires logging when a courier enters a 100 m radius of a
@@ -242,128 +197,104 @@ detailed behavior, acceptance criteria, and verification evidence.
   wording "reentries ... over 1 minute" is ambiguous.
 - **Decision:** Proximity state belongs to each courier–store pair. An entry is an
   outside→inside transition (inclusive boundary: `≤ 100 m` is inside). A first
-  observation already inside counts as an entry. A re-entry is counted only when
-  `≥ 60 s` have passed since the pair's previous *physical* entry; an uncounted
-  entry still updates that timestamp. Entry time is the report's input `time`,
-  the same clock that orders travel processing; only reports eligible for travel
-  processing (strictly newer) are evaluated for proximity. Counted and uncounted
-  entries share one `StoreEntry` model with a `counted` flag and are persisted.
+  observation already inside counts as an entry. A re-entry is a new entrance only
+  when `≥ 60 s` have passed since the pair's latest visit began; a re-entry sooner
+  is not an entrance, resumes that visit, and is not recorded (owner decision
+  2026-10-26, S001-D05; until then such re-entries were stored with `counted=false`
+  and moved the reference time). Entry time is the report's input `time`, the same
+  clock that orders travel processing; only reports eligible for travel processing
+  (strictly newer) are evaluated for proximity. Every persisted visit is one
+  entrance (`StoreVisit` since ADR-014).
   The five stores are loaded from `stores.json` into an immutable in-memory catalog.
 - **Alternatives:** Server processing time as the entry clock; a single per-courier
   timer; comparing with the last *counted* entry; exclusive boundary; a `stores` table.
-- **Trade-offs:** Per-pair state is precise and testable; repeated short re-entries
-  can suppress counting indefinitely (by design). Input time keeps entry counting
+- **Trade-offs:** Per-pair state is precise and testable; because the minute is
+  measured from the visit's entry, a courier bouncing at the boundary gets a new
+  entrance at most once per minute. Input time keeps entry counting
   deterministic and replay-safe but trusts the client clock. An in-memory catalog
   means adding a store requires a redeploy, which matches the supplied-file
   requirement. Spec: [S001](docs/specs/001-location-and-entry-semantics.md),
   [S009](docs/specs/009-store-entry-detection.md).
 
-### ADR-010: The entry log is the `store_entries` table
+### ADR-014: Store visits replace pair state and the entry log
 
-- **Context:** The case asks to "log courier and store" when a courier enters a
-  store area.
-- **Decision:** Every physical entry (counted or not) is persisted in
-  `store_entries` with courier ID, store name, entry time, and `counted`, in the
-  same transaction as the report. No application log line or event is emitted
-  for entries.
-- **Alternatives:** An INFO log line after commit via an application event
-  (implemented and then removed as needless complexity); an outbox and message broker.
-- **Trade-offs:** The record is durable, queryable, and consistent with the rest
-  of the transaction; operators look in the database rather than in log output.
+- **Context:** The S009 persistence split inside/outside state (`courier_store_proximity`,
+  an `inside` boolean) from the entry log (`store_entries`, a `counted` boolean).
+  Entry, inside, exit, and outside had to be reconstructed from two tables, exits
+  were never recorded, and the demo needed "which store, since when" after every
+  update.
+- **Decision:** One `courier_store_visits` table: a row per visit with `entry_time`
+  and `exit_time` (null while inside). Inside is derived from an open
+  visit; a partial unique index allows one open visit per courier–store pair; the
+  one-minute rule reads the pair's latest visit. The detector loads the latest
+  visit per store with one JPQL query (a correlated `MAX(entryTime)` subquery, so
+  Hibernate does not flush the dirty courier before the read). The courier row keeps a summary
+  (`current_store_name`, `last_store_name`, `last_store_entry_time`,
+  `last_report_entered`) written in the same transaction, and the distance query
+  returns it with `in-store`/`out-store` and `isEntry` (true only when the last
+  processed report opened a new visit)
+  through a `CourierSummary` read model, so entities never reach the controller.
+  The two old tables were dropped without migrating their rows (local data only);
+  since ADR-015 the changelog creates only the current tables. Entry semantics
+  (ADR-009) are unchanged.
+- **Alternatives:** Keep both tables and replace the booleans with enums (smallest
+  change, exits still missing); an append-only transition event log (complete
+  history, but current state needs a last-event query or a projection table);
+  migrating the old rows (unknown historical exit times and a Liquibase test harness).
+- **Trade-offs:** The visits table is updated on exit, so it is no longer
+  append-only. `exit_time` is the input time of the first outside report, not the
+  real moment of leaving. The courier summary duplicates what the visits table can
+  derive, in exchange for a single-row read on every distance query. When store
+  areas overlap, the summary names the most recently entered open store.
+  Spec: [S011](docs/specs/011-store-visits-and-courier-summary.md).
 
-### ADR-011: PostgreSQL 18, Liquibase native SQL, Testcontainers
+### Other decisions
 
-- **Context:** Correctness depends on database semantics (`ON CONFLICT`,
-  `FOR UPDATE`, timestamp precision), so tests must run against the real engine.
-- **Decision:** PostgreSQL 18 via Docker Compose for local runs; schema managed by
-  Liquibase with native SQL changeSets in one master changelog and
-  `ddl-auto=none`; integration tests use a PostgreSQL Testcontainer; `make` is
-  the single command entry point.
-- **Alternatives:** H2 for local/tests; Hibernate schema generation; Flyway.
-- **Trade-offs:** Tests prove the actual production semantics; Docker and JDK 25
-  are required to run and test the project.
-
-### ADR-012: GitHub Actions CI, JaCoCo coverage, and a Compose-packaged application
-
-- **Context:** The reviewer should be able to see the suite pass and run the
-  whole stack without a local JDK. The reference project established CI, coverage,
-  and container packaging as practices worth carrying over.
-- **Decision:** A GitHub Actions workflow runs `./gradlew clean build` on pushes
-  to `main`, pull requests, and manual dispatch, publishes test and JaCoCo reports
-  as artifacts, and posts a quality summary. JaCoCo finalizes the `test` task. A
-  multi-stage Dockerfile builds a non-root runtime image, and Compose runs it as an
-  `app` service next to PostgreSQL through `make stack-up`.
-- **Alternatives:** No CI; SpotBugs static analysis as in the reference (a
-  non-blocking report there); a standalone image without a Compose service; a
-  Postman collection alongside Swagger.
-- **Trade-offs:** CI exercises the real PostgreSQL Testcontainers suite on the
-  runner's Docker daemon, so runs take minutes rather than seconds. SpotBugs,
-  tracing headers, and a Postman collection are left out to keep the delivery
-  focused; coverage is reported, not enforced as a threshold.
-
-### ADR-013: Optional Kafka ingress through an inbound Adapter
-
-- **Context:** The case describes the input as streaming geolocations. The owner
-  wants a realistic streaming entry point next to the REST endpoint, a stronger
-  second design pattern than Repository, and hands-on Kafka experience, while the
-  reviewer must still be able to run the application without a broker.
-- **Decision:** A `courier.messaging` package holds an inbound Adapter: a
-  `CourierLocationMessage` record, a MapStruct mapper to `CourierLocationInput`, and
-  a `@KafkaListener` that parses the JSON value with the application's Jackson
-  mapper, validates the mapped input with the shared constraints, and calls the
-  concrete `CourierService.submitLocation`. Messages that can never succeed
-  (unparseable JSON, empty payload, constraint violations, unknown courier) are
-  skipped at once; other failures get three attempts in total (two retries, one
-  second apart), then are skipped. A skipped record is logged once at INFO with topic, partition, offset,
-  key, and exception class; publishing it to a dead-letter topic was implemented
-  and then removed by the owner on 2026-10-23 to keep this increment small
-  (S010-D14), and remains the planned next step. Delivery is at-least-once; redelivered records
-  are absorbed by the duplicate suppression of ADR-004. Everything Kafka-specific is
-  created only when `courier.kafka.enabled=true`, which the `kafka` Spring profile
-  sets; Compose starts a single-node KRaft broker under the `kafka` profile and Make
-  targets produce sample messages with the console producer. Spec:
-  [S010](docs/specs/010-kafka-location-ingress.md).
-- **Alternatives:** Kafka as the only input with REST removed; a service interface
-  ("port") with HTTP and Kafka implementations; Avro with a Schema Registry; Spring
-  Cloud Stream; Kafka transactions for exactly-once; a dead-letter topic now instead
-  of later.
-- **Trade-offs:** Two inputs must stay consistent, mitigated by one validation and
-  one service path. The Kafka integration test starts a second Testcontainer and
-  lengthens the suite. At-least-once means duplicates reach the database and are
-  rejected there. With the profile active and the broker unreachable, startup is
-  delayed by the admin client's topic-creation attempts (about 40 s observed) but
-  succeeds, and the consumer joins when the broker appears.
+- [ADR-002: API-first REST contract with a uniform error body](docs/architecture-decisions.md#adr-002-api-first-rest-contract-with-a-uniform-error-body)
+- [ADR-004: Database-level duplicate suppression](docs/architecture-decisions.md#adr-004-database-level-duplicate-suppression)
+- [ADR-006: Travel ordering by input time, strictly newer only](docs/architecture-decisions.md#adr-006-travel-ordering-by-input-time-strictly-newer-only)
+- [ADR-007: Haversine distance behind a Strategy](docs/architecture-decisions.md#adr-007-haversine-distance-behind-a-strategy)
+- [ADR-008: Explicit courier registration](docs/architecture-decisions.md#adr-008-explicit-courier-registration)
+- [ADR-010: The entry log is a database table](docs/architecture-decisions.md#adr-010-the-entry-log-is-a-database-table)
+- [ADR-011: PostgreSQL 18, Liquibase native SQL, Testcontainers](docs/architecture-decisions.md#adr-011-postgresql-18-liquibase-native-sql-testcontainers)
+- [ADR-012: GitHub Actions CI, JaCoCo coverage, and a Compose-packaged application](docs/architecture-decisions.md#adr-012-github-actions-ci-jacoco-coverage-and-a-compose-packaged-application)
+- [ADR-013: Optional Kafka ingress through an inbound Adapter](docs/architecture-decisions.md#adr-013-optional-kafka-ingress-through-an-inbound-adapter)
+- [ADR-015: Audit timestamps on every table and a create-only baseline changelog](docs/architecture-decisions.md#adr-015-audit-timestamps-on-every-table-and-a-create-only-baseline-changelog)
 
 ## Technology stack
 
-| Area                      | Technology                                                             |
-|---------------------------|------------------------------------------------------------------------|
-| Runtime                   | Java 25, Spring Boot 4.1.1                                             |
-| HTTP and validation       | Spring Web MVC, Jakarta Validation                                     |
-| Persistence               | PostgreSQL 18, Spring Data JPA, Hibernate                              |
-| Migrations                | Liquibase, native SQL changeSets in one master XML                     |
-| Mapping and boilerplate   | MapStruct 1.6.3, Lombok                                                |
-| API documentation         | springdoc-openapi 3.1.1                                                |
-| Health                    | Spring Boot Actuator                                                   |
-| Messaging                 | Spring for Apache Kafka 4.1.1, optional `kafka` profile, Apache Kafka 4.3 broker in Compose |
+| Area                      | Technology                                                                                   |
+|---------------------------|----------------------------------------------------------------------------------------------|
+| Runtime                   | Java 25, Spring Boot 4.1.1                                                                   |
+| HTTP and validation       | Spring Web MVC, Jakarta Validation                                                           |
+| Persistence               | PostgreSQL 18, Spring Data JPA, Hibernate                                                    |
+| Migrations                | Liquibase, native SQL changeSets in one master XML                                           |
+| Mapping and boilerplate   | MapStruct 1.6.3, Lombok                                                                      |
+| API documentation         | springdoc-openapi 3.1.1                                                                      |
+| Health                    | Spring Boot Actuator                                                                         |
+| Messaging                 | Spring for Apache Kafka 4.1.1, flag-enabled ingress, Apache Kafka 4.3 broker in Compose       |
 | Testing                   | JUnit 5, Mockito, AssertJ, Awaitility, Spring Boot Test, PostgreSQL and Kafka Testcontainers |
-| Coverage and CI           | JaCoCo, GitHub Actions                                                 |
-| Build and local execution | Gradle Wrapper, GNU Make, Docker Compose, multi-stage Dockerfile       |
+| Coverage and CI           | JaCoCo, GitHub Actions                                                                       |
+| Build and local execution | Gradle Wrapper, GNU Make, Docker Compose, multi-stage Dockerfile                             |
 
 ## Run locally
 
-Requirements: JDK 25, Docker Engine/Desktop with Compose v2, GNU Make.
+`make run` ([Quick start](#quick-start)) is the default way to run the application:
+PostgreSQL, the Kafka broker, and the application with the `local` profile, which
+enables the Kafka ingress (ADR-013). Besides [demo.html](http://localhost:8080/demo.html),
+use [Swagger UI](http://localhost:8080/swagger-ui/index.html) or the
+[curl walkthrough](docs/api-examples.md). All commands, environment variables, IDE
+setup, and troubleshooting are in the [development guide](docs/development-guide.md).
+
+To produce the sample Kafka messages from a second terminal while the application runs:
 
 ```sh
-make run
+make kafka-send         # register kafka-courier-1 and produce the sample location messages
+make kafka-send-invalid # three unprocessable messages: skipped and logged at INFO
 ```
 
-This starts PostgreSQL, waits for its health check, and runs the application on
-`http://localhost:8080`. Then open [Swagger UI](http://localhost:8080/swagger-ui/index.html)
-or follow the [curl walkthrough](docs/api-examples.md). For manual testing only,
-[demo.html](http://localhost:8080/demo.html) runs the success-path walkthrough from the browser, with a second tab for the Kafka sample commands and their HTTP verification. Stop with `Ctrl+C` and
-`make down`. All commands, environment variables, IDE setup, and troubleshooting
-are in the [development guide](docs/development-guide.md).
+The message contract is in the [development guide](docs/development-guide.md#kafka-ingress)
+and [API examples](docs/api-examples.md#kafka-messages).
 
 To run the whole stack in containers without a local JDK:
 
@@ -371,21 +302,9 @@ To run the whole stack in containers without a local JDK:
 make stack-up
 ```
 
-This builds the application image from the Dockerfile and starts PostgreSQL and
-the application on `http://localhost:8080`. Follow logs with `make stack-logs`
+This builds the application image from the Dockerfile and starts PostgreSQL, Kafka,
+and the application on `http://localhost:8080`. Follow logs with `make stack-logs`
 and stop with `make down`.
-
-With Kafka (optional, see ADR-013):
-
-```sh
-make run-kafka          # PostgreSQL + single-node Kafka broker + application with the local,kafka profiles
-make kafka-send         # register kafka-courier-1 and produce the sample location messages
-make kafka-send-invalid # three unprocessable messages: skipped and logged at INFO
-```
-
-`make stack-up-kafka` runs the same with the application in a container. Details and
-the message contract are in the [development guide](docs/development-guide.md#kafka-profile)
-and [API examples](docs/api-examples.md#kafka-messages).
 
 ## Testing
 
@@ -429,14 +348,15 @@ requests.
 
 | Document                                             | Purpose                                                       |
 |------------------------------------------------------|---------------------------------------------------------------|
-| [Documentation index](docs/README.md)                | Working cycle, specification conventions, document map        |
+| [Documentation index](docs/README.md)                | Working cycle, milestone review, specification conventions    |
 | [Initial decisions](docs/initial-decisions.md)       | Case requirements, interpretation, shared domain language     |
 | [Roadmap](docs/roadmap.md)                           | Milestones, progress, remaining work                          |
+| [Architectural decisions](docs/architecture-decisions.md) | All fifteen ADRs, including superseded ones              |
 | [Specifications](docs/specs)                         | Behavior, acceptance criteria, and verification per increment |
 | [API examples](docs/api-examples.md)                 | Swagger and ordered curl requests with expected responses     |
 | [Development guide](docs/development-guide.md)       | Commands, configuration, migrations, troubleshooting          |
 | [Implementation guide](docs/implementation-guide.md) | Conventions for Lombok, MapStruct, packages, geography        |
-| [Plans](docs/plans)                                  | Implementation plans executed against the specifications      |
+| [Local skills](docs/skills)                          | Spring Boot engineering and unit-test guidance for agents     |
 
 ## Remaining work
 

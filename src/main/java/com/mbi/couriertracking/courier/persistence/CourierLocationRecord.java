@@ -1,5 +1,6 @@
 package com.mbi.couriertracking.courier.persistence;
 
+import com.mbi.couriertracking.common.persistence.BaseEntity;
 import jakarta.persistence.*;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -15,7 +16,7 @@ import java.time.temporal.ChronoUnit;
 @Table(name = "courier_location_inputs")
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
-public class CourierLocationRecord {
+public class CourierLocationRecord extends BaseEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)

@@ -39,7 +39,7 @@
 <body>
 <h1>Courier Tracking API demo</h1>
 <p>Plain page mirroring <code>docs/api-examples.md</code>, success cases only. Start the application with
-<code>make run</code> (or <code>make run-kafka</code> for the Kafka panel) and open <code>http://localhost:8080/demo.html</code>.
+<code>make run</code> and open <code>http://localhost:8080/demo.html</code>.
 Each step shows its expected status; a green bar means the response matched it.</p>
 
 <p><label for="baseUrl">Base URL</label> <input type="text" id="baseUrl"></p>
@@ -64,7 +64,7 @@ Each step shows its expected status; a green bar means the response matched it.<
 
 <h2>Custom location</h2>
 <div class="step" id="custom">
-  <p class="desc">Build your own scenario. Click the map to pick lat/lng (drag the marker to adjust). Store buttons fill the exact
+  <p class="desc">Click the map to pick lat/lng (drag the marker to adjust). Store buttons fill the exact
   store coordinates and center the map there; the circles are the 100 m entry areas. Locations sent from this form are drawn as a path.</p>
   <div id="map"></div>
   <p class="picked" id="pickedInfo">Click the map to pick a point.</p>
@@ -81,8 +81,10 @@ Each step shows its expected status; a green bar means the response matched it.<
     <button type="button" onclick="addSeconds('cTime', 60)">time +60 s</button>
   </p>
   <p><button type="button" onclick="sendCustom()">Send location</button>
+     <button type="button" onclick="increaseTimeAndSend(this)">increase time + send location</button>
      <button type="button" onclick="runStep('distance')">Query distance</button>
-     <span class="meta">Expected: 204</span></p>
+     <span class="meta">Expected: 204, then the distance query runs automatically</span></p>
+  <p class="picked" id="storeSummary">Store summary appears here after a location is sent or the distance is queried.</p>
   <pre id="out-custom"></pre>
 </div>
 </div>
@@ -90,8 +92,8 @@ Each step shows its expected status; a green bar means the response matched it.<
 <!-- ===================== Kafka panel ===================== -->
 <div id="panel-kafka" class="panel">
 <p class="desc">The browser cannot produce Kafka records. Produce from a terminal with the commands below (copy buttons),
-then verify consumption through the HTTP API from this page. Requires <code>make run-kafka</code>: PostgreSQL, the
-Compose broker, and the application with the <code>local,kafka</code> profiles.</p>
+then verify consumption through the HTTP API from this page. Requires <code>make run</code>: PostgreSQL, the
+Compose broker, and the application with the <code>local</code> profile, which enables the Kafka ingress.</p>
 <p><label for="kafkaCourierId">Courier ID</label> <input type="text" id="kafkaCourierId" value="kafka-courier-1">
   <small>Fixed sample courier used by <code>scripts/kafka/sample-locations.jsonl</code>.</small></p>
 
@@ -114,7 +116,7 @@ kafka-courier-1|{"time":"2026-10-21T12:01:30Z","courier":"kafka-courier-1","lat"
 
 <div class="step" id="step-kDistance">
   <p><strong>K3. Verify consumption</strong> <span class="meta">GET /api/v1/couriers/distance · expected 200</span></p>
-  <p class="desc">On a fresh database the total after K2 is 1963.3136870424555 m and <code>store_entries</code> holds three counted rows.
+  <p class="desc">On a fresh database the total after K2 is 1963.3136870424555 m and <code>courier_store_visits</code> holds three rows: Ataşehir closed at 12:01:00, Novada closed at 12:01:30, Ataşehir open.
   A second <code>make kafka-send</code> is a duplicate no-op: the total does not change and no record is skipped.</p>
   <p><button type="button" onclick="runKafkaDistance()">Query distance</button>
      <button type="button" onclick="runKafkaList()">List couriers</button></p>
@@ -126,7 +128,7 @@ kafka-courier-1|{"time":"2026-10-21T12:01:30Z","courier":"kafka-courier-1","lat"
   <p class="desc">Three records that cannot succeed on retry: malformed JSON, latitude 95, and an unregistered courier.
   The application skips each one without retrying and logs a single INFO line
   (<code>Skipped unprocessable location message topic=… partition=… offset=… key=… exception=…</code>) in the
-  <code>make run-kafka</code> terminal; no rows are written. Afterwards K3 shows an unchanged total.
+  <code>make run</code> terminal; no rows are written. Afterwards K3 shows an unchanged total.
   Publishing skipped records to a dead-letter topic is the planned next step.</p>
   <pre class="cmd" id="cmd-kInvalid">make kafka-send-invalid</pre>
   <p><button type="button" onclick="copyText('cmd-kInvalid')">Copy command</button></p>
@@ -165,8 +167,8 @@ kafka-courier-1|{"time":"2026-10-21T12:01:30Z","courier":"kafka-courier-1","lat"
   <tr><td>Ortaköy MMM Migros</td><td>41.055783</td><td>29.0210292</td></tr>
   <tr><td>Caddebostan MMM Migros</td><td>40.9632463</td><td>29.0630908</td></tr>
 </table>
-<p><small>Store entries are not exposed through the API. Inspect them with <code>make db-shell</code> and
-<code>SELECT courier_id, store_name, entry_time, counted FROM store_entries ORDER BY entry_time;</code></small></p>
+<p><small>Individual visits are not exposed through the API. Inspect them with <code>make db-shell</code> and
+<code>SELECT courier_id, store_name, entry_time, exit_time FROM courier_store_visits ORDER BY entry_time;</code></small></p>
 
 <h2>Request log</h2>
 <pre id="log"></pre>
@@ -183,15 +185,15 @@ const STEPS = [
     desc: 'Array of {"courierId"} ordered by ID; [] when empty.' },
   { id: 'first', title: '4. Submit the first location (Ataşehir)', method: 'POST', path: '/api/v1/couriers/locations', expect: 204,
     body: '{"time":"2026-10-21T12:00:00Z","courier":"{{courierId}}","lat":40.9923307,"lng":29.1244229}',
-    desc: 'Initializes last location/time with distance zero and records a counted entry for Ataşehir. Repeating it is a duplicate: 204, nothing stored.' },
+    desc: 'Initializes last location/time with distance zero and opens a visit for Ataşehir. Repeating it is a duplicate: 204, nothing stored.' },
   { id: 'newer', title: '5. Submit a newer location (Novada)', method: 'POST', path: '/api/v1/couriers/locations', expect: 204,
     body: '{"time":"2026-10-21T12:01:00Z","courier":"{{courierId}}","lat":40.986106,"lng":29.1161293}',
-    desc: 'Adds the Haversine segment from Ataşehir and records a counted entry for Novada.' },
+    desc: 'Adds the Haversine segment from Ataşehir and closes the Ataşehir visit and opens one for Novada.' },
   { id: 'reenter', title: '5b. Re-enter Ataşehir after 90 s', method: 'POST', path: '/api/v1/couriers/locations', expect: 204,
     body: '{"time":"2026-10-21T12:01:30Z","courier":"{{courierId}}","lat":40.9923307,"lng":29.1244229}',
-    desc: 'Recorded with counted=true because 90 s passed since the previous Ataşehir entry. Change the time to 12:00:30Z and the report is stale (stored, no state change).' },
+    desc: 'Opens a second Ataşehir visit because 90 s passed since the previous Ataşehir entry; within 60 s it would only resume the first visit. Change the time to 12:00:30Z and the report is stale (stored, no state change).' },
   { id: 'distance', title: '6. Query distance', method: 'GET', path: '/api/v1/couriers/distance?courierId={{courierId}}', expect: 200,
-    desc: 'Accumulated distance in meters from persisted courier state.' },
+    desc: 'Accumulated distance in meters plus the last entered store, its entry time, and in-store/out-store status, all from the persisted courier row.' },
 ];
 
 const STORES = [
@@ -328,7 +330,7 @@ async function send(method, path, bodyText, contentType) {
   try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
   const line = 'HTTP ' + status + ' (' + ms + ' ms)' + (pretty ? '\n' + pretty : '\n<empty body>');
   logLine(method + ' ' + url + (bodyText !== undefined ? '\n  ' + bodyText : '') + '\n  -> ' + status);
-  return { status, line };
+  return { status, line, text };
 }
 
 async function runStep(id) {
@@ -337,9 +339,21 @@ async function runStep(id) {
   const bodyText = bodyEl ? substitute(bodyEl.value) : undefined;
   const out = byId('out-' + id);
   out.textContent = 'sending…';
-  const { status, line } = await send(step.method, substitute(step.path), bodyText);
+  const { status, line, text } = await send(step.method, substitute(step.path), bodyText);
   out.textContent = line;
+  if (status === 204 && step.path.endsWith('/locations')) { noteReportTime(byId('courierId').value.trim(), JSON.parse(bodyText).time); }
   mark(byId('step-' + id), status === step.expect);
+  if (id === 'distance' && status === 200) { renderStoreSummary(text); }
+}
+
+function renderStoreSummary(text) {
+  let summary;
+  try { summary = JSON.parse(text); } catch (_) { return; }
+  byId('storeSummary').textContent = 'Store: ' + (summary.lastStoreName ?? 'none')
+      + ' · ' + summary.currentStatus
+      + ' · ' + (summary.isEntry ? 'last report opened a visit (entry)' : 'last report: no new entry')
+      + ' · last entry ' + (summary.lastStoreEntryTime ?? 'none')
+      + ' · ' + Number(summary.distanceMeters).toFixed(2) + ' m';
 }
 
 async function runAll() {
@@ -351,10 +365,22 @@ function mark(el, ok) {
   el.classList.add(ok ? 'ok' : 'bad');
 }
 
+// Newest report time accepted per courier: a later report with an older or equal time is stored but changes nothing.
+const newestReportTime = {};
+
+function noteReportTime(courier, timeText) {
+  const time = Date.parse(timeText);
+  const stale = newestReportTime[courier] !== undefined && time <= newestReportTime[courier];
+  if (!stale) { newestReportTime[courier] = time; }
+  return stale;
+}
+
 async function sendCustom() {
+  const courier = byId('courierId').value.trim();
+  const time = byId('cTime').value.trim();
   const body = JSON.stringify({
-    time: byId('cTime').value.trim(),
-    courier: byId('courierId').value.trim(),
+    time,
+    courier,
     lat: Number(byId('cLat').value),
     lng: Number(byId('cLng').value),
   });
@@ -362,8 +388,30 @@ async function sendCustom() {
   out.textContent = 'sending…';
   const { status, line } = await send('POST', '/api/v1/couriers/locations', body);
   out.textContent = line;
+  if (status === 204 && noteReportTime(courier, time)) {
+    out.textContent += '\nNote: this time is not newer than the last report sent for this courier, so the report was stored but changed neither distance nor store status. Use "increase time + send location" or edit the time.';
+  }
   mark(byId('custom'), status === 204);
-  if (status === 204) { addPathPoint(Number(byId('cLat').value), Number(byId('cLng').value)); }
+  if (status === 204) {
+    addPathPoint(Number(byId('cLat').value), Number(byId('cLng').value));
+    await runStep('distance'); // show which store the courier is in after every update
+  }
+  return status;
+}
+
+async function increaseTimeAndSend(button) {
+  if (isNaN(new Date(byId('cTime').value.trim()).getTime())) {
+    byId('out-custom').textContent = 'Enter a valid time before sending.';
+    mark(byId('custom'), false);
+    return;
+  }
+  button.disabled = true;
+  try {
+    addSeconds('cTime', 60);
+    await sendCustom();
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // Kafka panel: HTTP verification steps.
