@@ -184,6 +184,7 @@ class CourierLocationKafkaIntegrationTests {
 
     @Test
     void transientFailureIsRetriedAndCommitted(CapturedOutput output) throws Exception {
+        register("kafka-ac04");
         doThrow(new TransientDataAccessResourceException("db")).doCallRealMethod()
                 .when(courierService).submitLocation(any());
 
